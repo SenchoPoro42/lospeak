@@ -1,397 +1,253 @@
 /**
  * VAD-Gated Noise Suppression
  * 
- * Uses RNNoise WASM to filter background noise AND gate non-voice sounds.
+ * Uses @jitsi/rnnoise-wasm to filter background noise AND gate non-voice sounds.
  * The key difference from standard RNNoise: we use the VAD (Voice Activity Detection)
  * score to completely silence audio when no voice is detected.
  * 
  * This effectively filters keyboard clicks, mouse clicks, and other impulsive sounds
  * that RNNoise alone would only reduce (not eliminate).
  * 
- * How it works:
- * 1. RNNoise processes each 480-sample frame (~10ms at 48kHz)
- * 2. It returns both denoised audio AND a VAD probability (0.0 - 1.0)
- * 3. If VAD < threshold (e.g., 0.85), we output silence instead of denoised audio
- * 4. If VAD >= threshold, we output the denoised audio
- * 
  * Architecture:
- * - Main thread: loads WASM binary, sends to worklet
- * - Worklet: compiles WASM, runs RNNoise processing with VAD gating
+ * - Uses ScriptProcessorNode (deprecated but reliable) for main-thread processing
+ * - RNNoise WASM loaded via @jitsi/rnnoise-wasm's proper loader
+ * - VAD gating applied based on returned probability score
  */
 
 // Configuration
 const VAD_THRESHOLD = 0.85; // Voice probability threshold (0-1). Higher = more aggressive gating
 const HOLD_FRAMES = 10;     // Hold voice state for N frames after VAD drops (prevents choppy speech)
+const RNNOISE_SAMPLE_LENGTH = 480; // RNNoise frame size
+const SHIFT_16_BIT = 32768;
+
+// WASM Module interface
+interface RnnoiseModule {
+  _rnnoise_create: () => number;
+  _rnnoise_destroy: (ctx: number) => void;
+  _rnnoise_process_frame: (ctx: number, input: number, output: number) => number;
+  _malloc: (size: number) => number;
+  _free: (ptr: number) => void;
+  HEAPF32: Float32Array;
+}
 
 // State
 let audioContext: AudioContext | null = null;
 let sourceNode: MediaStreamAudioSourceNode | null = null;
-let workletNode: AudioWorkletNode | null = null;
+let scriptNode: ScriptProcessorNode | null = null;
 let destinationNode: MediaStreamAudioDestinationNode | null = null;
 let originalTrack: MediaStreamTrack | null = null;
 let processedTrack: MediaStreamTrack | null = null;
 let isActive = false;
 
-/**
- * AudioWorklet processor code as a string.
- * This gets converted to a blob URL for loading.
- * 
- * The processor handles:
- * - Compiling WASM from binary received via message
- * - Buffering input samples (AudioWorklet uses 128-sample blocks, RNNoise needs 480)
- * - Calling RNNoise to denoise and get VAD score
- * - Gating output based on VAD threshold
- * - Smooth hold/release to prevent choppy speech
- */
-function getWorkletCode(): string {
-  return `
-// RNNoise constants
-const RNNOISE_SAMPLE_LENGTH = 480;
-const RNNOISE_BUFFER_SIZE = RNNOISE_SAMPLE_LENGTH * 4; // Float32 = 4 bytes
-const SHIFT_16_BIT_NR = 32768;
+// RNNoise state
+let rnnoiseModule: RnnoiseModule | null = null;
+let rnnoiseContext: number = 0;
+let wasmPcmPtr: number = 0;
+let wasmPcmF32Index: number = 0;
 
-// Minimal Emscripten-like environment for RNNoise WASM
-function createRnnoiseEnv(memory) {
-  const HEAP8 = new Int8Array(memory.buffer);
-  const HEAPU8 = new Uint8Array(memory.buffer);
-  const HEAP16 = new Int16Array(memory.buffer);
-  const HEAP32 = new Int32Array(memory.buffer);
-  const HEAPF32 = new Float32Array(memory.buffer);
-  const HEAPF64 = new Float64Array(memory.buffer);
+// Processing state - buffers need to be large enough for ScriptProcessor block size (4096) + RNNoise frame (480)
+let inputBuffer: Float32Array = new Float32Array(RNNOISE_SAMPLE_LENGTH * 16); // ~7680 samples
+let outputBuffer: Float32Array = new Float32Array(RNNOISE_SAMPLE_LENGTH * 16);
+let inputWriteIdx = 0;
+let inputReadIdx = 0;
+let outputWriteIdx = 0;
+let outputReadIdx = 0;
+let voiceHoldCounter = 0;
+let isVoiceActive = false;
+
+// Debug
+let lastLogTime = 0;
+let vadScoreSum = 0;
+let vadScoreCount = 0;
+let silencedFrames = 0;
+let passedFrames = 0;
+
+/**
+ * Load the RNNoise WASM module using Jitsi's loader.
+ */
+async function loadRnnoiseModule(): Promise<RnnoiseModule> {
+  if (rnnoiseModule) return rnnoiseModule;
   
-  return {
-    memory,
-    HEAP8, HEAPU8, HEAP16, HEAP32, HEAPF32, HEAPF64,
-    
-    // Memory management (simple bump allocator)
-    _heapPtr: 65536, // Start after reserved space
-    
-    malloc(size) {
-      const ptr = this._heapPtr;
-      this._heapPtr += size + (8 - (size % 8)); // Align to 8 bytes
-      return ptr;
-    },
-    
-    free(ptr) {
-      // Simple allocator doesn't free
-    }
-  };
+  // Use the async loader from @jitsi/rnnoise-wasm
+  const { createRNNWasmModule } = await import('@jitsi/rnnoise-wasm');
+  rnnoiseModule = await createRNNWasmModule() as RnnoiseModule;
+  return rnnoiseModule;
 }
 
-class VadNoiseProcessor extends AudioWorkletProcessor {
-  constructor(options) {
-    super();
-    
-    // Configuration from options
-    this.vadThreshold = options.processorOptions?.vadThreshold ?? 0.85;
-    this.holdFrames = options.processorOptions?.holdFrames ?? 10;
-    
-    // RNNoise state (initialized via message)
-    this.wasmInstance = null;
-    this.wasmEnv = null;
-    this.rnnoiseContext = 0;
-    this.wasmPcmInput = 0;
-    this.wasmPcmInputF32Index = 0;
-    this.initialized = false;
-    
-    // Circular buffer for sample rate conversion (128 -> 480)
-    // Use larger buffer to handle timing variations
-    this.inputBuffer = new Float32Array(RNNOISE_SAMPLE_LENGTH * 4);
-    this.outputBuffer = new Float32Array(RNNOISE_SAMPLE_LENGTH * 4);
-    this.inputWriteIdx = 0;
-    this.inputReadIdx = 0;
-    this.outputWriteIdx = 0;
-    this.outputReadIdx = 0;
-    
-    // VAD state
-    this.voiceHoldCounter = 0;
-    this.isVoiceActive = false;
-    
-    // Handle initialization message from main thread
-    this.port.onmessage = async (event) => {
-      if (event.data.type === 'init') {
-        await this.initRnnoise(event.data.wasmBinary);
-      }
-    };
+/**
+ * Initialize RNNoise context and buffers.
+ */
+function initRnnoiseContext(module: RnnoiseModule): void {
+  // Allocate buffer in WASM heap
+  wasmPcmPtr = module._malloc(RNNOISE_SAMPLE_LENGTH * 4); // Float32 = 4 bytes
+  wasmPcmF32Index = wasmPcmPtr >> 2; // Divide by 4 for Float32 index
+  
+  // Create RNNoise context
+  rnnoiseContext = module._rnnoise_create();
+  
+  console.log('[VAD] RNNoise context created:', rnnoiseContext, 'buffer:', wasmPcmPtr);
+}
+
+/**
+ * Process a single RNNoise frame and return VAD score.
+ */
+function processRnnoiseFrame(frame: Float32Array): number {
+  if (!rnnoiseModule || !rnnoiseContext) return 0;
+  
+  // Copy to WASM heap, scaling to 16-bit range
+  for (let i = 0; i < RNNOISE_SAMPLE_LENGTH; i++) {
+    rnnoiseModule.HEAPF32[wasmPcmF32Index + i] = frame[i] * SHIFT_16_BIT;
   }
   
-  async initRnnoise(wasmBinary) {
-    try {
-      // Create memory (16MB should be plenty for RNNoise)
-      const memory = new WebAssembly.Memory({ initial: 256, maximum: 256 }); // 16MB
-      
-      // Create environment
-      this.wasmEnv = createRnnoiseEnv(memory);
-      
-      // Compile and instantiate WASM
-      const importObject = {
-        env: {
-          memory: memory,
-          // RNNoise doesn't need many imports, but add stubs for safety
-          emscripten_memcpy_js: (dest, src, num) => {
-            this.wasmEnv.HEAPU8.copyWithin(dest, src, src + num);
-          },
-          __assert_fail: () => { throw new Error('Assertion failed'); },
-          abort: () => { throw new Error('Abort'); },
-        },
-        wasi_snapshot_preview1: {
-          fd_close: () => 0,
-          fd_seek: () => 0,
-          fd_write: () => 0,
-        }
-      };
-      
-      const result = await WebAssembly.instantiate(wasmBinary, importObject);
-      this.wasmInstance = result.instance;
-      
-      // Get exports
-      const exports = this.wasmInstance.exports;
-      
-      // If the WASM has its own memory, use that instead
-      if (exports.memory) {
-        this.wasmEnv = createRnnoiseEnv(exports.memory);
-      }
-      
-      // Allocate buffers
-      if (exports._malloc) {
-        this.wasmPcmInput = exports._malloc(RNNOISE_BUFFER_SIZE);
-      } else {
-        this.wasmPcmInput = this.wasmEnv.malloc(RNNOISE_BUFFER_SIZE);
-      }
-      this.wasmPcmInputF32Index = this.wasmPcmInput >> 2;
-      
-      // Create RNNoise context
-      if (exports._rnnoise_create) {
-        this.rnnoiseContext = exports._rnnoise_create();
-      } else if (exports.rnnoise_create) {
-        this.rnnoiseContext = exports.rnnoise_create();
-      }
-      
-      this.initialized = true;
-      this.port.postMessage({ type: 'initialized' });
-      
-    } catch (error) {
-      this.port.postMessage({ type: 'error', error: error.message });
-    }
+  // Process and get VAD score
+  const vadScore = rnnoiseModule._rnnoise_process_frame(
+    rnnoiseContext,
+    wasmPcmPtr,
+    wasmPcmPtr
+  );
+  
+  // Copy back denoised audio
+  for (let i = 0; i < RNNOISE_SAMPLE_LENGTH; i++) {
+    frame[i] = rnnoiseModule.HEAPF32[wasmPcmF32Index + i] / SHIFT_16_BIT;
   }
   
-  processRnnoiseFrame(frame) {
-    if (!this.initialized || !this.wasmInstance) return 0;
-    
-    const exports = this.wasmInstance.exports;
-    const HEAPF32 = this.wasmEnv.HEAPF32;
-    
-    // Copy input to WASM heap, converting to 16-bit range
+  return vadScore;
+}
+
+/**
+ * Get available samples in circular buffer.
+ */
+function getAvailable(writeIdx: number, readIdx: number, bufferLen: number): number {
+  if (writeIdx >= readIdx) {
+    return writeIdx - readIdx;
+  }
+  return bufferLen - readIdx + writeIdx;
+}
+
+/**
+ * Audio processing callback.
+ */
+function processAudio(event: AudioProcessingEvent): void {
+  const input = event.inputBuffer.getChannelData(0);
+  const output = event.outputBuffer.getChannelData(0);
+  
+  // Write all input samples to buffer
+  for (let i = 0; i < input.length; i++) {
+    inputBuffer[inputWriteIdx] = input[i];
+    inputWriteIdx = (inputWriteIdx + 1) % inputBuffer.length;
+  }
+  
+  // Process ALL complete 480-sample frames
+  while (getAvailable(inputWriteIdx, inputReadIdx, inputBuffer.length) >= RNNOISE_SAMPLE_LENGTH) {
+    // Extract frame
+    const frame = new Float32Array(RNNOISE_SAMPLE_LENGTH);
     for (let i = 0; i < RNNOISE_SAMPLE_LENGTH; i++) {
-      HEAPF32[this.wasmPcmInputF32Index + i] = frame[i] * SHIFT_16_BIT_NR;
+      frame[i] = inputBuffer[(inputReadIdx + i) % inputBuffer.length];
     }
+    inputReadIdx = (inputReadIdx + RNNOISE_SAMPLE_LENGTH) % inputBuffer.length;
     
-    // Process frame - returns VAD score (0-1), denoises in place
-    let vadScore = 0;
-    if (exports._rnnoise_process_frame) {
-      vadScore = exports._rnnoise_process_frame(
-        this.rnnoiseContext,
-        this.wasmPcmInput,
-        this.wasmPcmInput
-      );
-    } else if (exports.rnnoise_process_frame) {
-      vadScore = exports.rnnoise_process_frame(
-        this.rnnoiseContext,
-        this.wasmPcmInput,
-        this.wasmPcmInput
-      );
-    }
+    // Process with RNNoise
+    const vadScore = processRnnoiseFrame(frame);
     
-    // Copy denoised output back, converting from 16-bit range
-    for (let i = 0; i < RNNOISE_SAMPLE_LENGTH; i++) {
-      frame[i] = HEAPF32[this.wasmPcmInputF32Index + i] / SHIFT_16_BIT_NR;
-    }
-    
-    return vadScore;
-  }
-  
-  getAvailableInput() {
-    if (this.inputWriteIdx >= this.inputReadIdx) {
-      return this.inputWriteIdx - this.inputReadIdx;
-    }
-    return this.inputBuffer.length - this.inputReadIdx + this.inputWriteIdx;
-  }
-  
-  getAvailableOutput() {
-    if (this.outputWriteIdx >= this.outputReadIdx) {
-      return this.outputWriteIdx - this.outputReadIdx;
-    }
-    return this.outputBuffer.length - this.outputReadIdx + this.outputWriteIdx;
-  }
-  
-  process(inputs, outputs, parameters) {
-    const input = inputs[0]?.[0];
-    const output = outputs[0]?.[0];
-    
-    if (!input || !output) {
-      return true;
-    }
-    
-    // Pass through if not initialized
-    if (!this.initialized) {
-      output.set(input);
-      return true;
-    }
-    
-    // Write input samples to circular buffer
-    for (let i = 0; i < input.length; i++) {
-      this.inputBuffer[this.inputWriteIdx] = input[i];
-      this.inputWriteIdx = (this.inputWriteIdx + 1) % this.inputBuffer.length;
-    }
-    
-    // Process complete frames when we have enough input
-    while (this.getAvailableInput() >= RNNOISE_SAMPLE_LENGTH) {
-      // Extract frame from circular buffer
-      const frame = new Float32Array(RNNOISE_SAMPLE_LENGTH);
-      for (let i = 0; i < RNNOISE_SAMPLE_LENGTH; i++) {
-        frame[i] = this.inputBuffer[(this.inputReadIdx + i) % this.inputBuffer.length];
-      }
-      this.inputReadIdx = (this.inputReadIdx + RNNOISE_SAMPLE_LENGTH) % this.inputBuffer.length;
-      
-      // Process with RNNoise and get VAD score
-      const vadScore = this.processRnnoiseFrame(frame);
-      
-      // VAD gating with hold
-      if (vadScore >= this.vadThreshold) {
-        this.isVoiceActive = true;
-        this.voiceHoldCounter = this.holdFrames;
-      } else if (this.voiceHoldCounter > 0) {
-        this.voiceHoldCounter--;
-      } else {
-        this.isVoiceActive = false;
-      }
-      
-      // Write to output buffer (silence if not voice)
-      for (let i = 0; i < RNNOISE_SAMPLE_LENGTH; i++) {
-        this.outputBuffer[this.outputWriteIdx] = this.isVoiceActive ? frame[i] : 0;
-        this.outputWriteIdx = (this.outputWriteIdx + 1) % this.outputBuffer.length;
-      }
-    }
-    
-    // Read from output buffer
-    const available = this.getAvailableOutput();
-    if (available >= output.length) {
-      for (let i = 0; i < output.length; i++) {
-        output[i] = this.outputBuffer[this.outputReadIdx];
-        this.outputReadIdx = (this.outputReadIdx + 1) % this.outputBuffer.length;
-      }
+    // VAD gating
+    if (vadScore >= VAD_THRESHOLD) {
+      isVoiceActive = true;
+      voiceHoldCounter = HOLD_FRAMES;
+      passedFrames++;
+    } else if (voiceHoldCounter > 0) {
+      voiceHoldCounter--;
+      passedFrames++;
     } else {
-      // Not enough processed data, output silence to avoid glitches
-      output.fill(0);
+      isVoiceActive = false;
+      silencedFrames++;
     }
     
-    return true;
+    // Track VAD scores for debug
+    vadScoreSum += vadScore;
+    vadScoreCount++;
+    
+    // Write to output buffer (denoised audio if voice, silence otherwise)
+    for (let i = 0; i < RNNOISE_SAMPLE_LENGTH; i++) {
+      outputBuffer[outputWriteIdx] = isVoiceActive ? frame[i] : 0;
+      outputWriteIdx = (outputWriteIdx + 1) % outputBuffer.length;
+    }
   }
-}
-
-registerProcessor('vad-noise-processor', VadNoiseProcessor);
-`;
-}
-
-// WASM URL loaded dynamically to support Vite bundling
-let wasmUrlCache: string | null = null;
-
-/**
- * Get the WASM URL using Vite's ?url import.
- */
-async function getWasmUrl(): Promise<string> {
-  if (wasmUrlCache) return wasmUrlCache;
   
-  // Use dynamic import with ?url for Vite compatibility
-  const wasmModule = await import('@jitsi/rnnoise-wasm/dist/rnnoise.wasm?url');
-  wasmUrlCache = wasmModule.default;
-  return wasmUrlCache;
-}
-
-/**
- * Fetch the RNNoise WASM binary.
- */
-async function fetchWasmBinary(): Promise<ArrayBuffer> {
-  const wasmUrl = await getWasmUrl();
-  const response = await fetch(wasmUrl);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch WASM: ${response.status}`);
+  // Read from output buffer to fill output
+  const outAvailable = getAvailable(outputWriteIdx, outputReadIdx, outputBuffer.length);
+  
+  if (outAvailable >= output.length) {
+    for (let i = 0; i < output.length; i++) {
+      output[i] = outputBuffer[outputReadIdx];
+      outputReadIdx = (outputReadIdx + 1) % outputBuffer.length;
+    }
+  } else {
+    // Not enough data - output silence (shouldn't happen in steady state)
+    output.fill(0);
   }
-  return response.arrayBuffer();
+  
+  // Debug log every second
+  const now = performance.now() / 1000;
+  if (now - lastLogTime >= 1.0) {
+    const avgVad = vadScoreCount > 0 ? (vadScoreSum / vadScoreCount).toFixed(3) : 'N/A';
+    console.log('[VAD Debug] avgVAD:', avgVad, 
+      '| silenced:', silencedFrames, 
+      '| passed:', passedFrames,
+      '| threshold:', VAD_THRESHOLD,
+      '| outBuffer:', outAvailable);
+    vadScoreSum = 0;
+    vadScoreCount = 0;
+    silencedFrames = 0;
+    passedFrames = 0;
+    lastLogTime = now;
+  }
 }
 
 /**
  * Start VAD-gated noise suppression on an audio track.
- * 
- * @param track - Raw microphone track
- * @returns Processed track with noise suppression and VAD gating
  */
 export async function startVadNoiseSuppression(
   track: MediaStreamTrack
 ): Promise<MediaStreamTrack> {
-  // Clean up any existing session
   await stopVadNoiseSuppression();
-  
   originalTrack = track;
   
   try {
-    // Load RNNoise WASM binary
-    console.log('[VAD] Loading RNNoise WASM binary...');
-    const wasmBinary = await fetchWasmBinary();
-    console.log('[VAD] WASM binary loaded:', wasmBinary.byteLength, 'bytes');
+    // Load RNNoise
+    console.log('[VAD] Loading RNNoise WASM...');
+    const module = await loadRnnoiseModule();
+    initRnnoiseContext(module);
+    console.log('[VAD] RNNoise ready');
     
-    // Create AudioContext at 48kHz (RNNoise optimal sample rate)
-    audioContext = new AudioContext({ sampleRate: 48000 });
+    // Create AudioContext
+    audioContext = new AudioContext();
+    console.log('[VAD] AudioContext sample rate:', audioContext.sampleRate);
     
-    // Create worklet from blob URL
-    const workletCode = getWorkletCode();
-    const blob = new Blob([workletCode], { type: 'application/javascript' });
-    const workletUrl = URL.createObjectURL(blob);
-    
-    await audioContext.audioWorklet.addModule(workletUrl);
-    URL.revokeObjectURL(workletUrl);
-    console.log('[VAD] Worklet registered');
-    
-    // Create audio nodes
+    // Create nodes
     const stream = new MediaStream([track]);
     sourceNode = audioContext.createMediaStreamSource(stream);
     
-    workletNode = new AudioWorkletNode(audioContext, 'vad-noise-processor', {
-      processorOptions: {
-        vadThreshold: VAD_THRESHOLD,
-        holdFrames: HOLD_FRAMES
-      }
-    });
+    // Use ScriptProcessorNode (deprecated but works everywhere)
+    // Buffer size 4096 gives good balance of latency vs efficiency
+    scriptNode = audioContext.createScriptProcessor(4096, 1, 1);
+    scriptNode.onaudioprocess = processAudio;
     
     destinationNode = audioContext.createMediaStreamDestination();
     
-    // Wait for worklet initialization
-    const initPromise = new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('Worklet init timeout')), 10000);
-      
-      workletNode!.port.onmessage = (event) => {
-        if (event.data.type === 'initialized') {
-          clearTimeout(timeout);
-          console.log('[VAD] Worklet initialized');
-          resolve();
-        } else if (event.data.type === 'error') {
-          clearTimeout(timeout);
-          reject(new Error(event.data.error));
-        }
-      };
-    });
+    // Connect: source -> script -> destination
+    sourceNode.connect(scriptNode);
+    scriptNode.connect(destinationNode);
     
-    // Send WASM binary to worklet (transferable)
-    workletNode.port.postMessage(
-      { type: 'init', wasmBinary },
-      [wasmBinary] // Transfer ownership for efficiency
-    );
-    
-    await initPromise;
-    
-    // Connect audio graph: source -> worklet -> destination
-    sourceNode.connect(workletNode);
-    workletNode.connect(destinationNode);
+    // Reset buffers
+    inputBuffer.fill(0);
+    outputBuffer.fill(0);
+    inputWriteIdx = 0;
+    inputReadIdx = 0;
+    outputWriteIdx = 0;
+    outputReadIdx = 0;
+    voiceHoldCounter = 0;
+    isVoiceActive = false;
+    lastLogTime = performance.now() / 1000;
     
     processedTrack = destinationNode.stream.getAudioTracks()[0];
     isActive = true;
@@ -402,7 +258,7 @@ export async function startVadNoiseSuppression(
   } catch (error) {
     console.error('[VAD] Failed to start:', error);
     await stopVadNoiseSuppression();
-    return track; // Return original on failure
+    return track;
   }
 }
 
@@ -417,9 +273,10 @@ export async function stopVadNoiseSuppression(): Promise<MediaStreamTrack | null
     sourceNode = null;
   }
   
-  if (workletNode) {
-    workletNode.disconnect();
-    workletNode = null;
+  if (scriptNode) {
+    scriptNode.disconnect();
+    scriptNode.onaudioprocess = null;
+    scriptNode = null;
   }
   
   if (destinationNode) {
@@ -434,6 +291,20 @@ export async function stopVadNoiseSuppression(): Promise<MediaStreamTrack | null
       console.error('[VAD] Error closing AudioContext:', e);
     }
     audioContext = null;
+  }
+  
+  // Clean up RNNoise
+  if (rnnoiseModule && rnnoiseContext) {
+    try {
+      rnnoiseModule._rnnoise_destroy(rnnoiseContext);
+      if (wasmPcmPtr) {
+        rnnoiseModule._free(wasmPcmPtr);
+      }
+    } catch (e) {
+      console.error('[VAD] Error cleaning up RNNoise:', e);
+    }
+    rnnoiseContext = 0;
+    wasmPcmPtr = 0;
   }
   
   originalTrack = null;
