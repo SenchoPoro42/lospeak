@@ -27,6 +27,7 @@
 		"vite": "^7.2.2"
 	},
 	"dependencies": {
+		"@jitsi/rnnoise-wasm": "^0.2.1",
 		"@sapphi-red/web-noise-suppressor": "^0.3.5",
 		"@shiguredo/noise-suppression": "^2025.1.0",
 		"partysocket": "^1.1.6"

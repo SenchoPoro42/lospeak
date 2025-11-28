@@ -1,18 +1,29 @@
 /**
  * Noise Suppression Module
  * 
- * Uses RNNoise WASM to filter out background noise like keyboard clicks,
- * fans, and ambient sounds in real-time.
+ * Uses RNNoise WASM with VAD (Voice Activity Detection) gating to filter
+ * keyboard clicks, mouse clicks, fans, and other background sounds.
  * 
- * Two implementations for cross-browser support:
- * - Chrome/Edge: @shiguredo/noise-suppression (Insertable Streams - fastest)
- * - Firefox: @sapphi-red/web-noise-suppressor (AudioWorklet fallback)
+ * The key innovation: we use RNNoise's VAD score to GATE audio:
+ * - If VAD score < 85% (not voice), output SILENCE
+ * - If VAD score >= 85% (voice detected), output denoised audio
  * 
- * How it works:
- * 1. Takes your raw microphone MediaStreamTrack
- * 2. Passes audio through RNNoise ML model in real-time (~13ms latency)
- * 3. Returns a new "clean" track to send to peers
+ * This completely eliminates keyboard clicks when not speaking,
+ * rather than just reducing their volume.
+ * 
+ * Fallback chain:
+ * 1. VAD-gated RNNoise (primary - best for keyboard filtering)
+ * 2. Insertable Streams (Chrome/Edge - if VAD fails)
+ * 3. AudioWorklet (Firefox - if VAD fails)
  */
+
+import {
+  startVadNoiseSuppression,
+  stopVadNoiseSuppression,
+  isVadNoiseSuppressionActive,
+  getVadProcessedTrack,
+  getVadOriginalTrack
+} from './vad-noise';
 
 // Dynamic imports to avoid SSR issues - these only load on client
 let NoiseSuppressionProcessor: any = null;
@@ -23,8 +34,8 @@ let rnnoiseWorkletPath: string = '';
 let rnnoiseWasmPath: string = '';
 let noiseGateWorkletPath: string = '';
 
-// Load modules dynamically (client-side only)
-async function ensureModulesLoaded(): Promise<boolean> {
+// Load fallback modules dynamically (client-side only)
+async function ensureFallbackModulesLoaded(): Promise<boolean> {
   if (typeof window === 'undefined') return false;
   
   if (!NoiseSuppressionProcessor) {
@@ -62,16 +73,15 @@ async function ensureModulesLoaded(): Promise<boolean> {
 
 /**
  * Check if browser supports Insertable Streams (Chrome/Edge).
- * This is the faster method.
+ * These are Chrome-specific APIs not in standard TypeScript lib.
  */
 function supportsInsertableStreams(): boolean {
-  return typeof MediaStreamTrackProcessor !== 'undefined' &&
-         typeof MediaStreamTrackGenerator !== 'undefined';
+  return 'MediaStreamTrackProcessor' in globalThis &&
+         'MediaStreamTrackGenerator' in globalThis;
 }
 
 /**
- * Check if browser supports AudioWorklet (Firefox, Safari, Chrome).
- * This is the fallback method.
+ * Check if browser supports AudioWorklet.
  */
 function supportsAudioWorklet(): boolean {
   return typeof AudioWorkletNode !== 'undefined';
@@ -82,16 +92,13 @@ function supportsAudioWorklet(): boolean {
  */
 export function isNoiseSuppressionSupported(): boolean {
   if (typeof window === 'undefined') return false;
-  return supportsInsertableStreams() || supportsAudioWorklet();
+  return supportsAudioWorklet(); // VAD approach uses AudioWorklet
 }
 
-// === Insertable Streams Implementation (Chrome/Edge) ===
+// === Fallback Implementation State ===
 
 const SHIGUREDO_ASSETS = 'https://cdn.jsdelivr.net/npm/@shiguredo/noise-suppression@latest/dist';
-let shiguredoProcessor: NoiseSuppressionProcessor | null = null;
-
-// === AudioWorklet Implementation (Firefox) ===
-
+let shiguredoProcessor: any = null;
 let audioContext: AudioContext | null = null;
 let sourceNode: MediaStreamAudioSourceNode | null = null;
 let noiseGateNode: any = null;
@@ -102,11 +109,11 @@ let destinationNode: MediaStreamAudioDestinationNode | null = null;
 
 let originalTrack: MediaStreamTrack | null = null;
 let processedTrack: MediaStreamTrack | null = null;
-let activeMethod: 'insertable' | 'worklet' | null = null;
+let activeMethod: 'vad' | 'insertable' | 'worklet' | null = null;
 
 /**
  * Initialize and start noise suppression on an audio track.
- * Automatically selects the best method for the current browser.
+ * Uses VAD-gated RNNoise for best keyboard filtering, with fallbacks.
  * 
  * @param track - The raw microphone MediaStreamTrack
  * @returns The noise-suppressed track (or original if unsupported)
@@ -114,35 +121,48 @@ let activeMethod: 'insertable' | 'worklet' | null = null;
 export async function startNoiseSuppression(
   track: MediaStreamTrack
 ): Promise<MediaStreamTrack> {
-  // Ensure modules are loaded (client-side only)
-  await ensureModulesLoaded();
-  
   // Stop any existing processing first
   await stopNoiseSuppression();
   originalTrack = track;
 
-  // Try Insertable Streams first (Chrome/Edge - fastest)
+  // Try VAD-gated RNNoise first (best for keyboard filtering)
+  if (supportsAudioWorklet()) {
+    try {
+      console.log('[Noise] Using VAD-gated RNNoise...');
+      processedTrack = await startVadNoiseSuppression(track);
+      activeMethod = 'vad';
+      console.log('[Noise] VAD noise suppression active');
+      return processedTrack;
+    } catch (error) {
+      console.error('[Noise] VAD approach failed:', error);
+      // Fall through to legacy methods
+    }
+  }
+
+  // Load fallback modules
+  await ensureFallbackModulesLoaded();
+
+  // Fallback: Insertable Streams (Chrome/Edge)
   if (supportsInsertableStreams() && NoiseSuppressionProcessor) {
     try {
-      console.log('[Noise] Using Insertable Streams (Chrome/Edge)');
+      console.log('[Noise] Falling back to Insertable Streams (Chrome/Edge)');
       shiguredoProcessor = new NoiseSuppressionProcessor(SHIGUREDO_ASSETS);
       processedTrack = await shiguredoProcessor.startProcessing(track);
       activeMethod = 'insertable';
       console.log('[Noise] Suppression active (Insertable Streams)');
-      return processedTrack;
+      return processedTrack!;
     } catch (error) {
       console.error('[Noise] Insertable Streams failed:', error);
-      // Fall through to AudioWorklet
     }
   }
 
-  // Fallback to AudioWorklet (Firefox)
+  // Fallback: AudioWorklet (Firefox)
   if (supportsAudioWorklet() && RnnoiseWorkletNode && loadRnnoise) {
     try {
-      console.log('[Noise] Using AudioWorklet (Firefox)');
-      processedTrack = await startWorkletNoiseSuppression(track);
+      console.log('[Noise] Falling back to AudioWorklet');
+      processedTrack = await startFallbackWorkletSuppression(track);
       activeMethod = 'worklet';
-      console.log('[Noise] Suppression active (AudioWorklet)');
+      console.log('[Noise] Suppression active (AudioWorklet fallback)');
       return processedTrack;
     } catch (error) {
       console.error('[Noise] AudioWorklet failed:', error);
@@ -154,55 +174,40 @@ export async function startNoiseSuppression(
 }
 
 /**
- * AudioWorklet-based noise suppression for Firefox.
+ * Fallback AudioWorklet-based noise suppression.
  * Routes audio through: Mic → NoiseGate → RNNoise → Output Track
- * 
- * The noise gate cuts impulsive sounds (keyboard clicks) when not speaking,
- * then RNNoise handles continuous background noise.
  */
-async function startWorkletNoiseSuppression(
+async function startFallbackWorkletSuppression(
   track: MediaStreamTrack
 ): Promise<MediaStreamTrack> {
-  // Create AudioContext (sample rate should match RNNoise expectation)
   audioContext = new AudioContext({ sampleRate: 48000 });
   
-  // Load RNNoise WASM binary
   const wasmBinary = await loadRnnoise({ url: rnnoiseWasmPath });
   
-  // Register worklet processors
   await audioContext.audioWorklet.addModule(noiseGateWorkletPath);
   await audioContext.audioWorklet.addModule(rnnoiseWorkletPath);
   
-  // Create source from microphone track
   const stream = new MediaStream([track]);
   sourceNode = audioContext.createMediaStreamSource(stream);
   
-  // Create noise gate node (cuts sound below threshold)
-  // Tuned aggressively for keyboard noise filtering:
-  // - Higher threshold = more sounds get cut (less negative = more aggressive)
-  // - Keyboard clicks are impulsive and often below voice level
   noiseGateNode = new NoiseGateWorkletNode(audioContext, {
-    openThreshold: -30,   // dB to open gate (voice typically -20 to -10 dB)
-    closeThreshold: -35,  // dB to close gate (slightly lower to prevent flutter)
-    holdMs: 100,          // ms to hold open after voice stops
-    maxChannels: 1        // mono for voice
+    openThreshold: -30,
+    closeThreshold: -35,
+    holdMs: 100,
+    maxChannels: 1
   });
   
-  // Create RNNoise worklet node
   rnnoiseNode = new RnnoiseWorkletNode(audioContext, {
     wasmBinary,
-    maxChannels: 1 // Mono for voice
+    maxChannels: 1
   });
   
-  // Create destination to get output track
   destinationNode = audioContext.createMediaStreamDestination();
   
-  // Connect the audio graph: source → noiseGate → rnnoise → destination
   sourceNode.connect(noiseGateNode);
   noiseGateNode.connect(rnnoiseNode);
   rnnoiseNode.connect(destinationNode);
   
-  // Return the processed track
   return destinationNode.stream.getAudioTracks()[0];
 }
 
@@ -211,6 +216,11 @@ async function startWorkletNoiseSuppression(
  */
 export async function stopNoiseSuppression(): Promise<MediaStreamTrack | null> {
   const rawTrack = originalTrack;
+
+  // Clean up VAD noise suppression
+  if (activeMethod === 'vad') {
+    await stopVadNoiseSuppression();
+  }
 
   // Clean up Insertable Streams processor
   if (shiguredoProcessor) {
@@ -222,7 +232,7 @@ export async function stopNoiseSuppression(): Promise<MediaStreamTrack | null> {
     shiguredoProcessor = null;
   }
 
-  // Clean up AudioWorklet nodes
+  // Clean up fallback AudioWorklet nodes
   if (sourceNode) {
     sourceNode.disconnect();
     sourceNode = null;
@@ -264,7 +274,7 @@ export function isNoiseSuppressionActive(): boolean {
 }
 
 /**
- * Get the active method ('insertable' | 'worklet' | null).
+ * Get the active method ('vad' | 'insertable' | 'worklet' | null).
  */
 export function getActiveMethod(): string | null {
   return activeMethod;
