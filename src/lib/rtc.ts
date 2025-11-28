@@ -1,12 +1,14 @@
 import type { PeerState } from './types';
 
-// Audio constraints optimized for voice chat with ANC headphones
+// Audio constraints optimized for voice chat
+// Browser's built-in processing provides first-pass filtering,
+// then RNNoise provides ML-based deep noise removal
 export const audioConstraints: MediaStreamConstraints = {
   audio: {
-    echoCancellation: false,  // ANC handles isolation
-    noiseSuppression: false,  // Keep natural voice
-    autoGainControl: true,    // Normalize volume
-    sampleRate: 48000
+    echoCancellation: true,   // Reduce echo/feedback
+    noiseSuppression: true,   // Browser's basic noise filter (first pass)
+    autoGainControl: true,    // Normalize volume levels
+    sampleRate: 48000         // High quality for RNNoise
   },
   video: false
 };

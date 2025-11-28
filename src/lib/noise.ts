@@ -17,9 +17,11 @@
 // Dynamic imports to avoid SSR issues - these only load on client
 let NoiseSuppressionProcessor: any = null;
 let RnnoiseWorkletNode: any = null;
+let NoiseGateWorkletNode: any = null;
 let loadRnnoise: any = null;
 let rnnoiseWorkletPath: string = '';
 let rnnoiseWasmPath: string = '';
+let noiseGateWorkletPath: string = '';
 
 // Load modules dynamically (client-side only)
 async function ensureModulesLoaded(): Promise<boolean> {
@@ -38,13 +40,16 @@ async function ensureModulesLoaded(): Promise<boolean> {
     try {
       const suppressor = await import('@sapphi-red/web-noise-suppressor');
       RnnoiseWorkletNode = suppressor.RnnoiseWorkletNode;
+      NoiseGateWorkletNode = suppressor.NoiseGateWorkletNode;
       loadRnnoise = suppressor.loadRnnoise;
       
       // Dynamic URL imports for Vite
       const workletModule = await import('@sapphi-red/web-noise-suppressor/rnnoiseWorklet.js?url');
       const wasmModule = await import('@sapphi-red/web-noise-suppressor/rnnoise.wasm?url');
+      const gateModule = await import('@sapphi-red/web-noise-suppressor/noiseGateWorklet.js?url');
       rnnoiseWorkletPath = workletModule.default;
       rnnoiseWasmPath = wasmModule.default;
+      noiseGateWorkletPath = gateModule.default;
     } catch (e) {
       console.warn('[Noise] Could not load @sapphi-red/web-noise-suppressor');
     }
@@ -89,7 +94,8 @@ let shiguredoProcessor: NoiseSuppressionProcessor | null = null;
 
 let audioContext: AudioContext | null = null;
 let sourceNode: MediaStreamAudioSourceNode | null = null;
-let rnnoiseNode: RnnoiseWorkletNode | null = null;
+let noiseGateNode: any = null;
+let rnnoiseNode: any = null;
 let destinationNode: MediaStreamAudioDestinationNode | null = null;
 
 // === Shared State ===
@@ -149,7 +155,10 @@ export async function startNoiseSuppression(
 
 /**
  * AudioWorklet-based noise suppression for Firefox.
- * Routes audio through: Mic → AudioContext → RNNoise Worklet → Output Track
+ * Routes audio through: Mic → NoiseGate → RNNoise → Output Track
+ * 
+ * The noise gate cuts impulsive sounds (keyboard clicks) when not speaking,
+ * then RNNoise handles continuous background noise.
  */
 async function startWorkletNoiseSuppression(
   track: MediaStreamTrack
@@ -160,12 +169,22 @@ async function startWorkletNoiseSuppression(
   // Load RNNoise WASM binary
   const wasmBinary = await loadRnnoise({ url: rnnoiseWasmPath });
   
-  // Register the worklet processor
+  // Register worklet processors
+  await audioContext.audioWorklet.addModule(noiseGateWorkletPath);
   await audioContext.audioWorklet.addModule(rnnoiseWorkletPath);
   
   // Create source from microphone track
   const stream = new MediaStream([track]);
   sourceNode = audioContext.createMediaStreamSource(stream);
+  
+  // Create noise gate node (cuts sound below threshold)
+  // Tuned for keyboard noise: quick attack, moderate release
+  noiseGateNode = new NoiseGateWorkletNode(audioContext, {
+    threshold: -45,      // dB threshold (keyboard clicks are usually below voice)
+    attack: 0.005,       // 5ms attack (fast open for voice)
+    release: 0.05,       // 50ms release (quick close after speech stops)
+    hold: 0.05           // 50ms hold (prevents choppy audio)
+  });
   
   // Create RNNoise worklet node
   rnnoiseNode = new RnnoiseWorkletNode(audioContext, {
@@ -176,8 +195,9 @@ async function startWorkletNoiseSuppression(
   // Create destination to get output track
   destinationNode = audioContext.createMediaStreamDestination();
   
-  // Connect the audio graph: source → rnnoise → destination
-  sourceNode.connect(rnnoiseNode);
+  // Connect the audio graph: source → noiseGate → rnnoise → destination
+  sourceNode.connect(noiseGateNode);
+  noiseGateNode.connect(rnnoiseNode);
   rnnoiseNode.connect(destinationNode);
   
   // Return the processed track
@@ -204,6 +224,10 @@ export async function stopNoiseSuppression(): Promise<MediaStreamTrack | null> {
   if (sourceNode) {
     sourceNode.disconnect();
     sourceNode = null;
+  }
+  if (noiseGateNode) {
+    noiseGateNode.disconnect();
+    noiseGateNode = null;
   }
   if (rnnoiseNode) {
     rnnoiseNode.disconnect();
