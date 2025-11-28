@@ -14,12 +14,44 @@
  * 3. Returns a new "clean" track to send to peers
  */
 
-import { NoiseSuppressionProcessor } from '@shiguredo/noise-suppression';
-import { RnnoiseWorkletNode, loadRnnoise } from '@sapphi-red/web-noise-suppressor';
-// @ts-ignore - Vite URL import for worklet
-import rnnoiseWorkletPath from '@sapphi-red/web-noise-suppressor/rnnoiseWorklet.js?url';
-// @ts-ignore - Vite URL import for WASM
-import rnnoiseWasmPath from '@sapphi-red/web-noise-suppressor/rnnoise.wasm?url';
+// Dynamic imports to avoid SSR issues - these only load on client
+let NoiseSuppressionProcessor: any = null;
+let RnnoiseWorkletNode: any = null;
+let loadRnnoise: any = null;
+let rnnoiseWorkletPath: string = '';
+let rnnoiseWasmPath: string = '';
+
+// Load modules dynamically (client-side only)
+async function ensureModulesLoaded(): Promise<boolean> {
+  if (typeof window === 'undefined') return false;
+  
+  if (!NoiseSuppressionProcessor) {
+    try {
+      const shiguredo = await import('@shiguredo/noise-suppression');
+      NoiseSuppressionProcessor = shiguredo.NoiseSuppressionProcessor;
+    } catch (e) {
+      console.warn('[Noise] Could not load @shiguredo/noise-suppression');
+    }
+  }
+  
+  if (!RnnoiseWorkletNode) {
+    try {
+      const suppressor = await import('@sapphi-red/web-noise-suppressor');
+      RnnoiseWorkletNode = suppressor.RnnoiseWorkletNode;
+      loadRnnoise = suppressor.loadRnnoise;
+      
+      // Dynamic URL imports for Vite
+      const workletModule = await import('@sapphi-red/web-noise-suppressor/rnnoiseWorklet.js?url');
+      const wasmModule = await import('@sapphi-red/web-noise-suppressor/rnnoise.wasm?url');
+      rnnoiseWorkletPath = workletModule.default;
+      rnnoiseWasmPath = wasmModule.default;
+    } catch (e) {
+      console.warn('[Noise] Could not load @sapphi-red/web-noise-suppressor');
+    }
+  }
+  
+  return true;
+}
 
 // === Browser Detection ===
 
@@ -44,6 +76,7 @@ function supportsAudioWorklet(): boolean {
  * Check if any noise suppression method is supported.
  */
 export function isNoiseSuppressionSupported(): boolean {
+  if (typeof window === 'undefined') return false;
   return supportsInsertableStreams() || supportsAudioWorklet();
 }
 
@@ -75,12 +108,15 @@ let activeMethod: 'insertable' | 'worklet' | null = null;
 export async function startNoiseSuppression(
   track: MediaStreamTrack
 ): Promise<MediaStreamTrack> {
+  // Ensure modules are loaded (client-side only)
+  await ensureModulesLoaded();
+  
   // Stop any existing processing first
   await stopNoiseSuppression();
   originalTrack = track;
 
   // Try Insertable Streams first (Chrome/Edge - fastest)
-  if (supportsInsertableStreams()) {
+  if (supportsInsertableStreams() && NoiseSuppressionProcessor) {
     try {
       console.log('[Noise] Using Insertable Streams (Chrome/Edge)');
       shiguredoProcessor = new NoiseSuppressionProcessor(SHIGUREDO_ASSETS);
@@ -95,7 +131,7 @@ export async function startNoiseSuppression(
   }
 
   // Fallback to AudioWorklet (Firefox)
-  if (supportsAudioWorklet()) {
+  if (supportsAudioWorklet() && RnnoiseWorkletNode && loadRnnoise) {
     try {
       console.log('[Noise] Using AudioWorklet (Firefox)');
       processedTrack = await startWorkletNoiseSuppression(track);
