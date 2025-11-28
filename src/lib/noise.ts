@@ -178,12 +178,14 @@ async function startWorkletNoiseSuppression(
   sourceNode = audioContext.createMediaStreamSource(stream);
   
   // Create noise gate node (cuts sound below threshold)
-  // Tuned for keyboard noise: quick attack, moderate release
+  // Tuned aggressively for keyboard noise filtering:
+  // - Higher threshold = more sounds get cut
+  // - Keyboard clicks are impulsive and often below voice level
   noiseGateNode = new NoiseGateWorkletNode(audioContext, {
-    threshold: -45,      // dB threshold (keyboard clicks are usually below voice)
-    attack: 0.005,       // 5ms attack (fast open for voice)
-    release: 0.05,       // 50ms release (quick close after speech stops)
-    hold: 0.05           // 50ms hold (prevents choppy audio)
+    threshold: -35,      // dB threshold - MORE aggressive (was -45)
+    attack: 0.001,       // 1ms attack - opens fast for voice
+    release: 0.08,       // 80ms release - closes quickly when you stop
+    hold: 0.03           // 30ms hold - short to catch gaps between words
   });
   
   // Create RNNoise worklet node
