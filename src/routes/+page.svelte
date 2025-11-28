@@ -7,7 +7,8 @@
   import {
     isNoiseSuppressionSupported,
     startNoiseSuppression,
-    stopNoiseSuppression
+    stopNoiseSuppression,
+    getActiveMethod
   } from '$lib/noise';
 
   // State
@@ -543,12 +544,7 @@
 
         <!-- Noise filter toggle -->
         <label class="toggle-label">
-          <span>
-            Noise Filter
-            {#if !noiseFilterSupported}
-              <small class="unsupported">(Chrome/Edge only)</small>
-            {/if}
-          </span>
+          <span>Noise Filter</span>
           <button 
             class="toggle" 
             class:active={noiseFilterEnabled}
@@ -561,7 +557,12 @@
           </button>
         </label>
         {#if noiseFilterEnabled}
-          <p class="filter-hint">Filtering keyboard &amp; background noise</p>
+          <p class="filter-hint">
+            🎤 Filtering noise
+            <small>({getActiveMethod() === 'insertable' ? 'Insertable Streams' : 'AudioWorklet'})</small>
+          </p>
+        {:else if !noiseFilterSupported}
+          <p class="filter-hint unsupported">Not supported in this browser</p>
         {/if}
       </div>
     {/if}
