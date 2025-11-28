@@ -15,10 +15,15 @@
  */
 
 // Configuration
-const VAD_THRESHOLD = 0.85; // Voice probability threshold (0-1). Higher = more aggressive gating
+let vadThreshold = 0.85; // Voice probability threshold (0-1). Higher = more aggressive gating
 const HOLD_FRAMES = 10;     // Hold voice state for N frames after VAD drops (prevents choppy speech)
 const RNNOISE_SAMPLE_LENGTH = 480; // RNNoise frame size
 const SHIFT_16_BIT = 32768;
+
+// Live VAD score for UI display (smoothed)
+let currentVadScore = 0;
+let smoothedVadScore = 0;
+const VAD_SMOOTHING = 0.3; // Lower = smoother
 
 // WASM Module interface
 interface RnnoiseModule {
@@ -149,8 +154,12 @@ function processAudio(event: AudioProcessingEvent): void {
     // Process with RNNoise
     const vadScore = processRnnoiseFrame(frame);
     
+    // Update live VAD score (smoothed for UI)
+    currentVadScore = vadScore;
+    smoothedVadScore = smoothedVadScore * (1 - VAD_SMOOTHING) + vadScore * VAD_SMOOTHING;
+    
     // VAD gating
-    if (vadScore >= VAD_THRESHOLD) {
+    if (vadScore >= vadThreshold) {
       isVoiceActive = true;
       voiceHoldCounter = HOLD_FRAMES;
       passedFrames++;
@@ -193,7 +202,7 @@ function processAudio(event: AudioProcessingEvent): void {
     console.log('[VAD Debug] avgVAD:', avgVad, 
       '| silenced:', silencedFrames, 
       '| passed:', passedFrames,
-      '| threshold:', VAD_THRESHOLD,
+      '| threshold:', vadThreshold,
       '| outBuffer:', outAvailable);
     vadScoreSum = 0;
     vadScoreCount = 0;
@@ -333,4 +342,35 @@ export function getVadProcessedTrack(): MediaStreamTrack | null {
  */
 export function getVadOriginalTrack(): MediaStreamTrack | null {
   return originalTrack;
+}
+
+/**
+ * Get the current (smoothed) VAD score for UI display.
+ * Returns 0-1 where higher = more likely voice.
+ */
+export function getVadScore(): number {
+  return smoothedVadScore;
+}
+
+/**
+ * Get the raw (unsmoothed) VAD score.
+ */
+export function getRawVadScore(): number {
+  return currentVadScore;
+}
+
+/**
+ * Get the current VAD threshold.
+ */
+export function getVadThreshold(): number {
+  return vadThreshold;
+}
+
+/**
+ * Set the VAD threshold (0-1).
+ * Higher = more aggressive filtering (requires clearer voice to pass).
+ */
+export function setVadThreshold(threshold: number): void {
+  vadThreshold = Math.max(0, Math.min(1, threshold));
+  console.log('[VAD] Threshold set to:', vadThreshold);
 }

@@ -22,8 +22,15 @@ import {
   stopVadNoiseSuppression,
   isVadNoiseSuppressionActive,
   getVadProcessedTrack,
-  getVadOriginalTrack
+  getVadOriginalTrack,
+  getVadScore,
+  getRawVadScore,
+  getVadThreshold,
+  setVadThreshold
 } from './vad-noise';
+
+// Re-export VAD controls for UI
+export { getVadScore, getRawVadScore, getVadThreshold, setVadThreshold };
 
 // Dynamic imports to avoid SSR issues - these only load on client
 let NoiseSuppressionProcessor: any = null;

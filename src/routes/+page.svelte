@@ -4,11 +4,14 @@
   import PartySocket from 'partysocket';
   import { PeerConnection, audioConstraints, createAudioAnalyzer } from '$lib/rtc';
   import type { SignalMessage, PeerState } from '$lib/types';
-  import {
+import {
     isNoiseSuppressionSupported,
     startNoiseSuppression,
     stopNoiseSuppression,
-    getActiveMethod
+    getActiveMethod,
+    getVadScore,
+    getVadThreshold,
+    setVadThreshold
   } from '$lib/noise';
 
   // State
@@ -24,6 +27,10 @@
   let selectedDeviceId = $state<string>('');
   let noiseFilterEnabled = $state(false);
   let noiseFilterSupported = $state(false);
+  let vadScore = $state(0);
+  let vadThreshold = $state(0.85);
+  let vadPeak = $state(0);
+  let peakDecayTimer: ReturnType<typeof setTimeout> | null = null;
   
   let peers = $state<Map<string, PeerState>>(new Map());
   let localStream: MediaStream | null = null;
@@ -399,12 +406,68 @@
     }
   }
 
-  // Update local audio level
+  // Update local audio level and VAD score
   function updateLocalLevel() {
     if (localAudioAnalyzer && !muted) {
       // Could be used for self-visualization if needed
     }
+    // Update VAD score for meter display
+    if (noiseFilterEnabled) {
+      vadScore = getVadScore();
+      
+      // Track peak with decay
+      if (vadScore > vadPeak) {
+        vadPeak = vadScore;
+        // Reset decay timer
+        if (peakDecayTimer) clearTimeout(peakDecayTimer);
+        peakDecayTimer = setTimeout(() => {
+          // Slowly decay peak
+          const decayPeak = () => {
+            if (vadPeak > vadScore + 0.01) {
+              vadPeak = vadPeak * 0.95;
+              requestAnimationFrame(decayPeak);
+            }
+          };
+          decayPeak();
+        }, 1500); // Hold peak for 1.5s before decay
+      }
+    } else {
+      vadPeak = 0;
+    }
     animationFrame = requestAnimationFrame(updateLocalLevel);
+  }
+  
+  // Handle threshold drag on VAD meter
+  let isDraggingThreshold = $state(false);
+  let vadMeterBar: HTMLElement | null = $state(null);
+  
+  function handleThresholdDragStart(e: MouseEvent | TouchEvent) {
+    isDraggingThreshold = true;
+    e.preventDefault();
+    document.addEventListener('mousemove', handleThresholdDrag);
+    document.addEventListener('mouseup', handleThresholdDragEnd);
+    document.addEventListener('touchmove', handleThresholdDrag);
+    document.addEventListener('touchend', handleThresholdDragEnd);
+  }
+  
+  function handleThresholdDrag(e: MouseEvent | TouchEvent) {
+    if (!isDraggingThreshold || !vadMeterBar) return;
+    
+    const rect = vadMeterBar.getBoundingClientRect();
+    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+    const x = clientX - rect.left;
+    const percent = Math.max(0.5, Math.min(0.98, x / rect.width));
+    
+    vadThreshold = percent;
+    setVadThreshold(percent);
+  }
+  
+  function handleThresholdDragEnd() {
+    isDraggingThreshold = false;
+    document.removeEventListener('mousemove', handleThresholdDrag);
+    document.removeEventListener('mouseup', handleThresholdDragEnd);
+    document.removeEventListener('touchmove', handleThresholdDrag);
+    document.removeEventListener('touchend', handleThresholdDragEnd);
   }
 
   onMount(async () => {
@@ -556,11 +619,54 @@
             <span class="toggle-slider"></span>
           </button>
         </label>
+        
         {#if noiseFilterEnabled}
-          <p class="filter-hint">
-            🎤 Filtering noise
-            <small>({getActiveMethod() === 'insertable' ? 'Insertable Streams' : 'AudioWorklet'})</small>
-          </p>
+          <!-- VAD Meter -->
+          <div class="vad-meter">
+            <div class="vad-meter-label">
+              <span>Voice Level</span>
+              <span class="vad-score">{(vadScore * 100).toFixed(0)}%</span>
+            </div>
+            <div 
+              class="vad-meter-bar" 
+              bind:this={vadMeterBar}
+              role="slider"
+              aria-valuemin="50"
+              aria-valuemax="98"
+              aria-valuenow={Math.round(vadThreshold * 100)}
+              aria-label="VAD threshold"
+              tabindex="0"
+            >
+              <div 
+                class="vad-meter-fill" 
+                class:passing={vadScore >= vadThreshold}
+                style="width: {vadScore * 100}%"
+              ></div>
+              {#if vadPeak > 0.01}
+                <div 
+                  class="vad-peak-marker"
+                  style="left: {vadPeak * 100}%"
+                  title="Peak: {(vadPeak * 100).toFixed(0)}%"
+                ></div>
+              {/if}
+              <div 
+                class="vad-threshold-marker" 
+                class:dragging={isDraggingThreshold}
+                style="left: {vadThreshold * 100}%"
+                title="Drag to adjust threshold ({(vadThreshold * 100).toFixed(0)}%)"
+                onmousedown={handleThresholdDragStart}
+                ontouchstart={handleThresholdDragStart}
+                role="button"
+                tabindex="0"
+              >
+                <span class="threshold-label">{(vadThreshold * 100).toFixed(0)}%</span>
+              </div>
+            </div>
+            <p class="filter-hint">
+              {vadScore >= vadThreshold ? '🎤 Voice passing' : '🔇 Silenced'}
+              <span class="threshold-hint">Drag marker to adjust</span>
+            </p>
+          </div>
         {:else if !noiseFilterSupported}
           <p class="filter-hint unsupported">Not supported in this browser</p>
         {/if}
