@@ -179,13 +179,13 @@ async function startWorkletNoiseSuppression(
   
   // Create noise gate node (cuts sound below threshold)
   // Tuned aggressively for keyboard noise filtering:
-  // - Higher threshold = more sounds get cut
+  // - Higher threshold = more sounds get cut (less negative = more aggressive)
   // - Keyboard clicks are impulsive and often below voice level
   noiseGateNode = new NoiseGateWorkletNode(audioContext, {
-    threshold: -35,      // dB threshold - MORE aggressive (was -45)
-    attack: 0.001,       // 1ms attack - opens fast for voice
-    release: 0.08,       // 80ms release - closes quickly when you stop
-    hold: 0.03           // 30ms hold - short to catch gaps between words
+    openThreshold: -30,   // dB to open gate (voice typically -20 to -10 dB)
+    closeThreshold: -35,  // dB to close gate (slightly lower to prevent flutter)
+    holdMs: 100,          // ms to hold open after voice stops
+    maxChannels: 1        // mono for voice
   });
   
   // Create RNNoise worklet node
