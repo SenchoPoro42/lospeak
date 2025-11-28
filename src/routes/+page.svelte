@@ -4,6 +4,11 @@
   import PartySocket from 'partysocket';
   import { PeerConnection, audioConstraints, createAudioAnalyzer } from '$lib/rtc';
   import type { SignalMessage, PeerState } from '$lib/types';
+  import {
+    isNoiseSuppressionSupported,
+    startNoiseSuppression,
+    stopNoiseSuppression
+  } from '$lib/noise';
 
   // State
   let myId = $state('');
@@ -16,6 +21,8 @@
   let showSettings = $state(false);
   let audioDevices = $state<MediaDeviceInfo[]>([]);
   let selectedDeviceId = $state<string>('');
+  let noiseFilterEnabled = $state(false);
+  let noiseFilterSupported = $state(false);
   
   let peers = $state<Map<string, PeerState>>(new Map());
   let localStream: MediaStream | null = null;
@@ -59,6 +66,10 @@
       localStream = await navigator.mediaDevices.getUserMedia(constraints);
       localAudioAnalyzer = createAudioAnalyzer(localStream);
       await loadAudioDevices();
+      
+      // Check noise suppression support
+      noiseFilterSupported = isNoiseSuppressionSupported();
+      
       // Update selected device to match actual device
       const track = localStream.getAudioTracks()[0];
       if (track) {
@@ -111,6 +122,61 @@
       console.log('[Audio] Switched to device:', deviceId);
     } catch (err) {
       console.error('Failed to switch audio device:', err);
+    }
+  }
+
+  /**
+   * Toggle noise filter on/off.
+   * When enabled, processes audio through RNNoise to remove
+   * keyboard clicks, fan noise, and other background sounds.
+   */
+  async function toggleNoiseFilter() {
+    if (!localStream) return;
+    
+    const track = localStream.getAudioTracks()[0];
+    if (!track) return;
+
+    try {
+      let newTrack: MediaStreamTrack;
+
+      if (!noiseFilterEnabled) {
+        // Enable: process track through RNNoise
+        console.log('[Noise] Enabling filter...');
+        newTrack = await startNoiseSuppression(track);
+        noiseFilterEnabled = true;
+      } else {
+        // Disable: stop processing and use raw track
+        console.log('[Noise] Disabling filter...');
+        await stopNoiseSuppression();
+        
+        // Get fresh raw track from current device
+        const constraints: MediaStreamConstraints = {
+          audio: {
+            ...audioConstraints.audio as MediaTrackConstraints,
+            deviceId: selectedDeviceId ? { exact: selectedDeviceId } : undefined
+          },
+          video: false
+        };
+        const freshStream = await navigator.mediaDevices.getUserMedia(constraints);
+        newTrack = freshStream.getAudioTracks()[0];
+        
+        // Update local stream reference
+        localStream = freshStream;
+        localAudioAnalyzer = createAudioAnalyzer(localStream);
+        
+        // Apply mute state
+        newTrack.enabled = !muted;
+        noiseFilterEnabled = false;
+      }
+
+      // Replace track on all peer connections
+      for (const pc of connections.values()) {
+        await pc.replaceAudioTrack(newTrack);
+      }
+
+      console.log('[Noise] Filter', noiseFilterEnabled ? 'enabled' : 'disabled');
+    } catch (err) {
+      console.error('Failed to toggle noise filter:', err);
     }
   }
 
@@ -355,6 +421,9 @@
     
     cancelAnimationFrame(animationFrame);
     
+    // Clean up noise suppression
+    stopNoiseSuppression();
+    
     // Clean up connections
     connections.forEach(pc => pc.close());
     connections.clear();
@@ -456,6 +525,8 @@
     {#if showSettings}
       <div class="settings-panel glass">
         <h3>Audio Settings</h3>
+        
+        <!-- Microphone selection -->
         <label>
           <span>Microphone</span>
           <select 
@@ -469,6 +540,29 @@
             {/each}
           </select>
         </label>
+
+        <!-- Noise filter toggle -->
+        <label class="toggle-label">
+          <span>
+            Noise Filter
+            {#if !noiseFilterSupported}
+              <small class="unsupported">(Chrome/Edge only)</small>
+            {/if}
+          </span>
+          <button 
+            class="toggle" 
+            class:active={noiseFilterEnabled}
+            onclick={toggleNoiseFilter}
+            disabled={!noiseFilterSupported}
+            aria-pressed={noiseFilterEnabled}
+            aria-label="Toggle noise filter"
+          >
+            <span class="toggle-slider"></span>
+          </button>
+        </label>
+        {#if noiseFilterEnabled}
+          <p class="filter-hint">Filtering keyboard &amp; background noise</p>
+        {/if}
       </div>
     {/if}
 

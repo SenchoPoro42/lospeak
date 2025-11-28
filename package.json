@@ -27,6 +27,7 @@
 		"vite": "^7.2.2"
 	},
 	"dependencies": {
+		"@shiguredo/noise-suppression": "^2025.1.0",
 		"partysocket": "^1.1.6"
 	}
 }
