@@ -307,6 +307,92 @@ html, body {
   background: #5558e3;
 }
 
+/* Settings button */
+.settings-button {
+  position: fixed;
+  bottom: 2rem;
+  right: 2rem;
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-full);
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--transition-normal);
+  color: var(--text-secondary);
+}
+
+.settings-button:hover {
+  color: var(--text-primary);
+  transform: scale(1.05);
+}
+
+.settings-button svg {
+  width: 22px;
+  height: 22px;
+}
+
+/* Settings panel */
+.settings-panel {
+  position: fixed;
+  bottom: 6rem;
+  right: 2rem;
+  padding: 1.25rem;
+  min-width: 260px;
+  animation: slideUp 0.2s ease;
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.settings-panel h3 {
+  font-size: 0.9rem;
+  font-weight: 500;
+  margin-bottom: 1rem;
+  color: var(--text-primary);
+}
+
+.settings-panel label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.settings-panel label span {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.settings-panel select {
+  padding: 0.6rem 0.75rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--glass-border);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  outline: none;
+  cursor: pointer;
+  transition: border-color var(--transition-fast);
+}
+
+.settings-panel select:hover {
+  border-color: var(--accent-primary);
+}
+
+.settings-panel select:focus {
+  border-color: var(--accent-primary);
+}
+
 /* Responsive */
 @media (max-width: 480px) {
   .container {

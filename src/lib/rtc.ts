@@ -86,6 +86,14 @@ export class PeerConnection {
   close() {
     this.pc.close();
   }
+
+  async replaceAudioTrack(newTrack: MediaStreamTrack) {
+    const senders = this.pc.getSenders();
+    const audioSender = senders.find(s => s.track?.kind === 'audio');
+    if (audioSender) {
+      await audioSender.replaceTrack(newTrack);
+    }
+  }
 }
 
 // Audio level detection for speaking indicators

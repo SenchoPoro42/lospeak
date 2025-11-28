@@ -13,6 +13,9 @@
   let connecting = $state(true);
   let roomId = $state('main');
   let roomInput = $state('');
+  let showSettings = $state(false);
+  let audioDevices = $state<MediaDeviceInfo[]>([]);
+  let selectedDeviceId = $state<string>('');
   
   let peers = $state<Map<string, PeerState>>(new Map());
   let localStream: MediaStream | null = null;
@@ -31,14 +34,83 @@
     return name.split(' ').map(w => w[0]).join('').slice(0, 2);
   }
 
-  async function initAudio() {
+  async function loadAudioDevices() {
     try {
-      localStream = await navigator.mediaDevices.getUserMedia(audioConstraints);
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      audioDevices = devices.filter(d => d.kind === 'audioinput');
+      // Set default device if not set
+      if (!selectedDeviceId && audioDevices.length > 0) {
+        selectedDeviceId = audioDevices[0].deviceId;
+      }
+    } catch (err) {
+      console.error('Failed to enumerate devices:', err);
+    }
+  }
+
+  async function initAudio(deviceId?: string) {
+    try {
+      const constraints: MediaStreamConstraints = {
+        audio: {
+          ...audioConstraints.audio as MediaTrackConstraints,
+          deviceId: deviceId ? { exact: deviceId } : undefined
+        },
+        video: false
+      };
+      localStream = await navigator.mediaDevices.getUserMedia(constraints);
       localAudioAnalyzer = createAudioAnalyzer(localStream);
+      await loadAudioDevices();
+      // Update selected device to match actual device
+      const track = localStream.getAudioTracks()[0];
+      if (track) {
+        const settings = track.getSettings();
+        if (settings.deviceId) {
+          selectedDeviceId = settings.deviceId;
+        }
+      }
       return true;
     } catch (err) {
       console.error('Failed to get audio:', err);
       return false;
+    }
+  }
+
+  async function switchAudioDevice(deviceId: string) {
+    if (!deviceId || deviceId === selectedDeviceId) return;
+    
+    try {
+      // Stop old tracks
+      if (localStream) {
+        localStream.getTracks().forEach(track => track.stop());
+      }
+      
+      // Get new stream with selected device
+      const constraints: MediaStreamConstraints = {
+        audio: {
+          ...audioConstraints.audio as MediaTrackConstraints,
+          deviceId: { exact: deviceId }
+        },
+        video: false
+      };
+      localStream = await navigator.mediaDevices.getUserMedia(constraints);
+      localAudioAnalyzer = createAudioAnalyzer(localStream);
+      selectedDeviceId = deviceId;
+      
+      // Apply mute state
+      localStream.getAudioTracks().forEach(track => {
+        track.enabled = !muted;
+      });
+      
+      // Replace track on all peer connections
+      const newTrack = localStream.getAudioTracks()[0];
+      if (newTrack) {
+        for (const pc of connections.values()) {
+          await pc.replaceAudioTrack(newTrack);
+        }
+      }
+      
+      console.log('[Audio] Switched to device:', deviceId);
+    } catch (err) {
+      console.error('Failed to switch audio device:', err);
     }
   }
 
@@ -368,6 +440,39 @@
   {/if}
 
   {#if connected}
+    <!-- Settings button -->
+    <button 
+      class="settings-button glass"
+      onclick={() => showSettings = !showSettings}
+      aria-label="Settings"
+    >
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+        <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+      </svg>
+    </button>
+
+    <!-- Settings panel -->
+    {#if showSettings}
+      <div class="settings-panel glass">
+        <h3>Audio Settings</h3>
+        <label>
+          <span>Microphone</span>
+          <select 
+            value={selectedDeviceId}
+            onchange={(e) => switchAudioDevice(e.currentTarget.value)}
+          >
+            {#each audioDevices as device}
+              <option value={device.deviceId}>
+                {device.label || `Microphone ${audioDevices.indexOf(device) + 1}`}
+              </option>
+            {/each}
+          </select>
+        </label>
+      </div>
+    {/if}
+
+    <!-- Mute button -->
     <button 
       class="mute-button" 
       class:muted 
