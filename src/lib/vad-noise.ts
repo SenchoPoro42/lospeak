@@ -73,9 +73,17 @@ let passedFrames = 0;
 async function loadRnnoiseModule(): Promise<RnnoiseModule> {
   if (rnnoiseModule) return rnnoiseModule;
   
-  // Use the async loader from @jitsi/rnnoise-wasm
+  // Use the async loader from @jitsi/rnnoise-wasm and force WASM URL resolution.
+  // Without locateFile, nested routes like /r/<room> can fetch rnnoise.wasm from the wrong path
+  // (e.g., returning index.html with text/html), causing the "magic number" validation error.
   const { createRNNWasmModule } = await import('@jitsi/rnnoise-wasm');
-  rnnoiseModule = await createRNNWasmModule() as RnnoiseModule;
+  const wasmUrl = typeof window !== 'undefined'
+    ? new URL('/rnnoise.wasm', window.location.origin).toString()
+    : 'rnnoise.wasm';
+  const createModuleAny = createRNNWasmModule as unknown as (opts: any) => Promise<RnnoiseModule>;
+  rnnoiseModule = await createModuleAny({
+    locateFile: (path: string) => (path.endsWith('.wasm') ? wasmUrl : path)
+  });
   return rnnoiseModule;
 }
 

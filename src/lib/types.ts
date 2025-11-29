@@ -6,7 +6,10 @@ export type SignalMessage =
   | { type: "offer"; from: string; to: string; offer: RTCSessionDescriptionInit }
   | { type: "answer"; from: string; to: string; answer: RTCSessionDescriptionInit }
   | { type: "ice-candidate"; from: string; to: string; candidate: RTCIceCandidateInit }
-  | { type: "mute-status"; peerId: string; muted: boolean };
+  | { type: "mute-status"; peerId: string; muted: boolean }
+  | { type: "rename"; peerId: string; name: string }
+  | { type: "rename-request"; name: string }
+  | { type: "error"; reason: string };
 
 export interface PeerInfo {
   id: string;

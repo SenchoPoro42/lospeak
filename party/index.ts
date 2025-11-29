@@ -19,6 +19,33 @@ function generateName(): string {
   return `${adj} ${noun}`;
 }
 
+function sanitizeName(raw: string): string {
+  let name = (raw || "").toString().trim();
+  // Collapse whitespace and limit charset/length
+  name = name.replace(/\s+/g, " ").replace(/[^A-Za-z0-9 _\-]/g, "").slice(0, 24);
+  return name || generateName();
+}
+
+function isNameTaken(peers: Map<string, PeerInfo>, name: string, exceptId?: string): boolean {
+  name = name.toLowerCase();
+  for (const [id, p] of peers) {
+    if (id !== exceptId && p.name.toLowerCase() === name) return true;
+  }
+  return false;
+}
+
+function allocateUniqueName(peers: Map<string, PeerInfo>, base?: string): string {
+  const tryBase = sanitizeName(base || generateName());
+  if (!isNameTaken(peers, tryBase)) return tryBase;
+  // Append numeric suffix until free
+  for (let i = 2; i < 1000; i++) {
+    const candidate = `${tryBase}-${i}`;
+    if (!isNameTaken(peers, candidate)) return candidate;
+  }
+  // Fallback (should never happen)
+  return `${tryBase}-${Date.now() % 1000}`;
+}
+
 // Message types for signaling
 type SignalMessage =
   | { type: "join"; peerId: string; name: string }
@@ -27,7 +54,10 @@ type SignalMessage =
   | { type: "offer"; from: string; to: string; offer: RTCSessionDescriptionInit }
   | { type: "answer"; from: string; to: string; answer: RTCSessionDescriptionInit }
   | { type: "ice-candidate"; from: string; to: string; candidate: RTCIceCandidateInit }
-  | { type: "mute-status"; peerId: string; muted: boolean };
+  | { type: "mute-status"; peerId: string; muted: boolean }
+  | { type: "rename-request"; name: string }
+  | { type: "rename"; peerId: string; name: string }
+  | { type: "error"; reason: string };
 
 interface PeerInfo {
   id: string;
@@ -42,7 +72,7 @@ export default class LoSpeakServer implements Party.Server {
 
   onConnect(conn: Party.Connection, ctx: Party.ConnectionContext) {
     const peerId = conn.id;
-    const name = generateName();
+    const name = allocateUniqueName(this.peers);
     
     // Store peer info
     this.peers.set(peerId, { id: peerId, name, connection: conn });
@@ -93,6 +123,24 @@ export default class LoSpeakServer implements Party.Server {
             muted: data.muted
           }), [sender.id]);
           break;
+        case "rename-request": {
+          const current = this.peers.get(sender.id);
+          if (!current) break;
+          const proposed = sanitizeName((data as any).name);
+          const unique = isNameTaken(this.peers, proposed, sender.id)
+            ? allocateUniqueName(this.peers, proposed)
+            : proposed;
+          if (unique !== current.name) {
+            current.name = unique;
+            this.peers.set(sender.id, current);
+            this.broadcast(JSON.stringify({
+              type: "rename",
+              peerId: sender.id,
+              name: unique
+            }));
+          }
+          break;
+        }
       }
     } catch (e) {
       console.error("Failed to parse message:", e);
