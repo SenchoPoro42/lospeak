@@ -352,7 +352,7 @@ html, body {
 }
 
 /* Landing */
-.profile-card { max-width: 560px; padding: 1rem; margin-bottom: 0.5rem; }
+.profile-card { width: 100%; max-width: 560px; padding: 1rem; margin-bottom: 0.5rem; }
 .landing {
   width: 100%;
   max-width: 560px;
@@ -403,9 +403,9 @@ html, body {
 .join.segmented .dash { color: var(--text-muted); padding: 0 2px; user-select: none; }
 
 /* Share row */
-.share-row { display: flex; gap: 0.5rem; justify-content: center; margin-top: 0.75rem; }
-.share-row input { width: 360px; padding: 0.6rem 0.75rem; border-radius: var(--radius-sm); border: 1px solid var(--glass-border); background: var(--bg-secondary); color: var(--text-secondary); }
-.share-row button { padding: 0.6rem 0.9rem; border-radius: var(--radius-sm); border: 1px solid var(--glass-border); background: var(--glass-bg); color: var(--text-primary); cursor: pointer; }
+.share-row { display: flex; gap: 0.5rem; justify-content: center; margin-top: 0.75rem; flex-wrap: wrap; }
+.share-row input { flex: 1; min-width: 200px; max-width: 360px; padding: 0.6rem 0.75rem; border-radius: var(--radius-sm); border: 1px solid var(--glass-border); background: var(--bg-secondary); color: var(--text-secondary); }
+.share-row button { padding: 0.6rem 0.9rem; border-radius: var(--radius-sm); border: 1px solid var(--glass-border); background: var(--glass-bg); color: var(--text-primary); cursor: pointer; white-space: nowrap; }
 
 .soft-cap { margin-left: 0.75rem; font-size: 0.75rem; color: var(--text-muted); }
 
@@ -835,11 +835,16 @@ html, body {
 /* Responsive */
 @media (max-width: 480px) {
   .container {
-    padding: 1.5rem;
+    padding: 1rem;
   }
   
   .header h1 {
     font-size: 1.5rem;
+  }
+
+  .header .subtitle {
+    font-size: 0.85rem;
+    padding: 0 0.5rem;
   }
   
   .peers-grid {
@@ -854,6 +859,73 @@ html, body {
   .mute-button {
     width: 64px;
     height: 64px;
+    bottom: 1.5rem;
+  }
+
+  /* Landing page */
+  .profile-card { padding: 0.75rem; }
+  .landing { padding: 1.25rem; }
+
+  /* Segmented join - stack vertically on mobile */
+  .join.segmented {
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0.75rem;
+  }
+  .join.segmented .dash {
+    display: none;
+  }
+  .join.segmented .seg {
+    min-width: unset;
+    width: 100%;
+    padding: 0.65rem 0.75rem;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-sm);
+  }
+  .join.segmented .seg:focus {
+    border-color: var(--accent-primary);
+  }
+  .join.segmented button {
+    width: 100%;
+    margin-top: 0.25rem;
+    padding: 0.75rem;
+    background: var(--accent-primary);
+    font-weight: 500;
+  }
+
+  /* Share row - stack vertically */
+  .share-row {
+    flex-direction: column;
+    width: 100%;
+  }
+  .share-row input {
+    width: 100%;
+  }
+  .share-row button {
+    width: 100%;
+  }
+
+  /* Empty state */
+  .empty-state { padding: 1.5rem; }
+
+  /* Room banner */
+  .room-banner {
+    padding: 1rem;
+    width: 100%;
+  }
+  .room-banner .code {
+    font-size: 1.25rem;
+  }
+
+  /* Settings panel */
+  .settings-panel {
+    right: 1rem;
+    left: 1rem;
+    min-width: unset;
+  }
+  .settings-button {
+    right: 1rem;
     bottom: 1.5rem;
   }
 }

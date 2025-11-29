@@ -154,7 +154,7 @@
 
     <div class="join segmented" role="group" aria-label="Room code">
       <input class="seg w1" bind:this={w1El} inputmode="text" autocapitalize="off" autocomplete="off" spellcheck={false}
-             placeholder="word"
+             placeholder="First word"
              value={codeW1}
              oninput={handleW1Input}
              onkeydown={w1Keydown}
@@ -162,20 +162,20 @@
              aria-label="First word" />
       <span class="dash">-</span>
       <input class="seg w2" bind:this={w2El} inputmode="text" autocapitalize="off" autocomplete="off" spellcheck={false}
-             placeholder="word"
+             placeholder="Second word"
              value={codeW2}
              oninput={handleW2Input}
              onkeydown={w2Keydown}
              onpaste={handleSmartPaste}
              aria-label="Second word" />
       <span class="dash">-</span>
-      <input class="seg num" bind:this={numEl} inputmode="numeric" pattern="[0-9]*" placeholder="000"
+      <input class="seg num" bind:this={numEl} inputmode="numeric" pattern="[0-9]*" placeholder="Code (e.g. 742)"
              value={codeNum}
              oninput={handleNumInput}
              onkeydown={numKeydown}
              onpaste={handleSmartPaste}
              aria-label="Number" />
-      <button onclick={joinByCode}>Join</button>
+      <button onclick={joinByCode}>Join room</button>
     </div>
     {#if error}
       <p class="error">{error}</p>
