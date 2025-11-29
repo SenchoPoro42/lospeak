@@ -116,7 +116,7 @@
 <div class="container">
   <header class="header">
     <h1><a href="/" class="brand-link">LoSpeak</a></h1>
-    <p class="subtitle">Simple, shareable rooms for local voice chat</p>
+    <p class="subtitle">Simple, shareable rooms for peer-to-peer voice chat</p>
   </header>
 
   <!-- Self card on landing -->
