@@ -25,16 +25,23 @@ export class PeerConnection {
   pc: RTCPeerConnection;
   peerId: string;
   onIceCandidate: (candidate: RTCIceCandidateInit) => void;
-  onTrack: (stream: MediaStream) => void;
+  onAudioTrack: (stream: MediaStream) => void;
+  onVideoTrack: (stream: MediaStream) => void;
+  onNegotiationNeeded: () => void;
+  private videoSender: RTCRtpSender | null = null;
 
   constructor(
     peerId: string,
     onIceCandidate: (candidate: RTCIceCandidateInit) => void,
-    onTrack: (stream: MediaStream) => void
+    onAudioTrack: (stream: MediaStream) => void,
+    onVideoTrack?: (stream: MediaStream) => void,
+    onNegotiationNeeded?: () => void
   ) {
     this.peerId = peerId;
     this.onIceCandidate = onIceCandidate;
-    this.onTrack = onTrack;
+    this.onAudioTrack = onAudioTrack;
+    this.onVideoTrack = onVideoTrack || (() => {});
+    this.onNegotiationNeeded = onNegotiationNeeded || (() => {});
     this.pc = new RTCPeerConnection(rtcConfig);
 
     this.pc.onicecandidate = (event) => {
@@ -43,10 +50,21 @@ export class PeerConnection {
       }
     };
 
+    // Differentiate incoming tracks by kind
     this.pc.ontrack = (event) => {
-      if (event.streams[0]) {
-        this.onTrack(event.streams[0]);
+      if (!event.streams[0]) return;
+      
+      if (event.track.kind === 'audio') {
+        this.onAudioTrack(event.streams[0]);
+      } else if (event.track.kind === 'video') {
+        this.onVideoTrack(event.streams[0]);
       }
+    };
+
+    // Handle renegotiation needed (e.g., when adding/removing video track)
+    this.pc.onnegotiationneeded = () => {
+      console.log(`[RTC] Negotiation needed for ${peerId}`);
+      this.onNegotiationNeeded();
     };
 
     this.pc.onconnectionstatechange = () => {
@@ -95,6 +113,38 @@ export class PeerConnection {
     if (audioSender) {
       await audioSender.replaceTrack(newTrack);
     }
+  }
+
+  /**
+   * Add a video track to the connection (for camera).
+   * This triggers renegotiation.
+   */
+  addVideoTrack(track: MediaStreamTrack, stream: MediaStream) {
+    if (this.videoSender) {
+      console.warn(`[RTC] Video track already exists for ${this.peerId}`);
+      return;
+    }
+    this.videoSender = this.pc.addTrack(track, stream);
+    console.log(`[RTC] Added video track to ${this.peerId}`);
+  }
+
+  /**
+   * Remove the video track from the connection.
+   * This triggers renegotiation.
+   */
+  removeVideoTrack() {
+    if (this.videoSender) {
+      this.pc.removeTrack(this.videoSender);
+      this.videoSender = null;
+      console.log(`[RTC] Removed video track from ${this.peerId}`);
+    }
+  }
+
+  /**
+   * Check if this connection has an active video track.
+   */
+  hasVideoTrack(): boolean {
+    return this.videoSender !== null;
   }
 }
 

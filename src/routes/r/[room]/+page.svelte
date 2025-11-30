@@ -15,6 +15,8 @@ import {
     getVadThreshold,
     setVadThreshold
   } from '$lib/noise';
+import { getCameraStream, stopCameraStream, isCameraSupported } from '$lib/camera';
+import { ScreenShareManager, ScreenViewerConnection, isScreenShareSupported } from '$lib/screen';
 
   // State
   let myId = $state('');
@@ -32,6 +34,57 @@ import {
   let vadThreshold = $state(0.85);
   let vadPeak = $state(0);
   let peakDecayTimer: ReturnType<typeof setTimeout> | null = null;
+  
+  // Camera state
+  let cameraEnabled = $state(false);
+  let cameraStream: MediaStream | null = null;
+  let cameraSupported = $state(false);
+  let selfVideoEl: HTMLVideoElement | null = null;
+  
+  // Screen share state
+  let screenSharing = $state(false);
+  let screenShareSupported = $state(false);
+  let screenShareManager: ScreenShareManager | null = null;
+  let screenViewerConnections = new Map<string, ScreenViewerConnection>();
+  
+  // Expanded view / Theater mode state
+  let expandedPeerId = $state<string | null>(null);
+  let expandedType = $state<'screen' | 'camera'>('screen');
+  let theaterMode = $derived(expandedPeerId !== null);
+  
+  // Self PiP state
+  let selfPipHidden = $state(false);
+  let selfPipDragging = $state(false);
+  let selfPipEl: HTMLElement | null = null;
+  
+  // Sorted peers for strip (video-first, then by speaking activity)
+  let lastSpeakTime = new Map<string, number>(); // Track when peers last spoke
+  
+  // Update speaking time when peer speaks
+  $effect(() => {
+    for (const [id, peer] of peers) {
+      if (peer.speaking) {
+        lastSpeakTime.set(id, Date.now());
+      }
+    }
+  });
+  
+  // Computed sorted peers array
+  let sortedPeers = $derived.by(() => {
+    const peerArray = [...peers.values()];
+    return peerArray.sort((a, b) => {
+      // Video-enabled peers first
+      const aHasVideo = (a.cameraEnabled && a.cameraStream) || (a.screenSharing && a.screenSubscribed && a.screenStream);
+      const bHasVideo = (b.cameraEnabled && b.cameraStream) || (b.screenSharing && b.screenSubscribed && b.screenStream);
+      if (aHasVideo && !bHasVideo) return -1;
+      if (!aHasVideo && bHasVideo) return 1;
+      
+      // Then by recent speaking activity
+      const aLastSpoke = lastSpeakTime.get(a.id) || 0;
+      const bLastSpoke = lastSpeakTime.get(b.id) || 0;
+      return bLastSpoke - aLastSpoke; // Most recent first
+    });
+  });
   
   // Volume controls
   let micGain = $state(1.0);       // 0-2 range (0% to 200%)
@@ -77,6 +130,21 @@ import {
 
   function getInitials(name: string): string {
     return name.split(' ').map(w => w[0]).join('').slice(0, 2);
+  }
+
+  // Svelte action to set video srcObject
+  function setVideoStream(node: HTMLVideoElement, stream: MediaStream) {
+    node.srcObject = stream;
+    return {
+      update(newStream: MediaStream) {
+        if (node.srcObject !== newStream) {
+          node.srcObject = newStream;
+        }
+      },
+      destroy() {
+        node.srcObject = null;
+      }
+    };
   }
 
   async function loadAudioDevices() {
@@ -304,9 +372,9 @@ import {
             }
           } catch {}
           
-          // Connect to existing peers
+          // Connect to existing peers (with their current screen sharing status)
           for (const peer of data.peers) {
-            await connectToPeer(peer.id, peer.name, true);
+            await connectToPeer(peer.id, peer.name, true, peer.screenSharing);
           }
           break;
 
@@ -344,13 +412,108 @@ import {
           break;
         }
 
-        case 'mute-status':
+        case 'mute-status': {
           const peer = peers.get(data.peerId);
           if (peer) {
             peers.set(data.peerId, { ...peer, muted: data.muted });
             peers = new Map(peers);
           }
           break;
+        }
+
+        case 'camera-status': {
+          const peer = peers.get(data.peerId);
+          if (peer) {
+            peers.set(data.peerId, { ...peer, cameraEnabled: data.enabled });
+            peers = new Map(peers);
+            console.log(`[Camera] ${peer.name} camera ${data.enabled ? 'on' : 'off'}`);
+          }
+          break;
+        }
+
+        case 'screen-start': {
+          const peer = peers.get(data.peerId);
+          if (peer) {
+            peers.set(data.peerId, { ...peer, screenSharing: true });
+            peers = new Map(peers);
+            console.log(`[Screen] ${peer.name} started sharing`);
+          }
+          break;
+        }
+
+        case 'screen-stop': {
+          const peer = peers.get(data.peerId);
+          if (peer) {
+            peers.set(data.peerId, { ...peer, screenSharing: false, screenStream: undefined, screenSubscribed: false });
+            peers = new Map(peers);
+            console.log(`[Screen] ${peer.name} stopped sharing`);
+          }
+          // Clean up viewer connection if we were subscribed
+          const viewerConn = screenViewerConnections.get(data.peerId);
+          if (viewerConn) {
+            viewerConn.close();
+            screenViewerConnections.delete(data.peerId);
+          }
+          break;
+        }
+
+        case 'screen-subscribe': {
+          // Someone wants to watch our screen
+          if (screenShareManager && screenSharing) {
+            const offer = await screenShareManager.addSubscriber(data.from);
+            if (offer) {
+              socket?.send(JSON.stringify({
+                type: 'screen-offer',
+                to: data.from,
+                offer
+              }));
+            }
+          }
+          break;
+        }
+
+        case 'screen-unsubscribe': {
+          // Someone stopped watching our screen
+          if (screenShareManager) {
+            screenShareManager.removeSubscriber(data.from);
+          }
+          break;
+        }
+
+        case 'screen-offer': {
+          // Sharer sent us an offer (we subscribed)
+          const viewerConn = screenViewerConnections.get(data.from);
+          if (viewerConn) {
+            const answer = await viewerConn.handleOffer(data.offer);
+            socket?.send(JSON.stringify({
+              type: 'screen-answer',
+              to: data.from,
+              answer
+            }));
+          }
+          break;
+        }
+
+        case 'screen-answer': {
+          // Subscriber answered our offer
+          if (screenShareManager) {
+            await screenShareManager.handleAnswer(data.from, data.answer);
+          }
+          break;
+        }
+
+        case 'screen-ice': {
+          // ICE candidate for screen share
+          // Could be from subscriber to sharer or sharer to subscriber
+          if (screenShareManager) {
+            await screenShareManager.handleIceCandidate(data.from, data.candidate);
+          }
+          const viewerConn = screenViewerConnections.get(data.from);
+          if (viewerConn) {
+            await viewerConn.addIceCandidate(data.candidate);
+          }
+          break;
+        }
       }
     });
 
@@ -366,7 +529,7 @@ import {
     });
   }
 
-  async function connectToPeer(peerId: string, name: string, initiator: boolean) {
+  async function connectToPeer(peerId: string, name: string, initiator: boolean, isScreenSharing: boolean = false) {
     if (connections.has(peerId)) return;
 
     const peerState: PeerState = {
@@ -374,13 +537,21 @@ import {
       name,
       muted: false,
       speaking: false,
-      audioLevel: 0
+      audioLevel: 0,
+      // Camera (presence layer)
+      cameraEnabled: false,
+      cameraStream: undefined,
+      // Screen share (content layer)
+      screenSharing: isScreenSharing,
+      screenStream: undefined,
+      screenSubscribed: false
     };
     peers.set(peerId, peerState);
     peers = new Map(peers);
 
     const pc = new PeerConnection(
       peerId,
+      // onIceCandidate
       (candidate) => {
         socket?.send(JSON.stringify({
           type: 'ice-candidate',
@@ -388,13 +559,19 @@ import {
           candidate
         }));
       },
+      // onAudioTrack
       (stream) => {
         // Create audio element for this peer
         const audio = new Audio();
         audio.srcObject = stream;
         audio.autoplay = true;
-        audio.volume = outputVolume; // Apply current output volume
+        audio.volume = outputVolume;
         audioElements.set(peerId, audio);
+        
+        // Explicit play() with error handling for autoplay policy
+        audio.play().catch(err => {
+          console.warn(`[Audio] Autoplay blocked for ${peerId}, will retry on user interaction:`, err);
+        });
         
         // Set up audio level detection for remote peer
         const analyzer = createAudioAnalyzer(stream);
@@ -413,8 +590,41 @@ import {
         
         // Update audio levels periodically
         const interval = setInterval(updateLevel, 100);
-        // Store interval for cleanup
         (pc as any)._levelInterval = interval;
+      },
+      // onVideoTrack - camera stream from peer
+      (stream) => {
+        const peer = peers.get(peerId);
+        if (peer) {
+          peers.set(peerId, { ...peer, cameraStream: stream });
+          peers = new Map(peers);
+          console.log(`[Camera] Received video from ${peer.name}`);
+        }
+      },
+      // onNegotiationNeeded - re-send offer when tracks change
+      // Only handle renegotiation after initial connection is established
+      async () => {
+        // Skip during initial connection setup - only handle mid-call changes
+        if (pc.pc.signalingState !== 'stable') {
+          console.log(`[RTC] Skipping negotiation for ${peerId} (state: ${pc.pc.signalingState})`);
+          return;
+        }
+        // Only renegotiate if we have remote description (connection established)
+        if (!pc.pc.remoteDescription) {
+          console.log(`[RTC] Skipping negotiation for ${peerId} (no remote description yet)`);
+          return;
+        }
+        try {
+          console.log(`[RTC] Renegotiating with ${peerId}`);
+          const offer = await pc.createOffer();
+          socket?.send(JSON.stringify({
+            type: 'offer',
+            to: peerId,
+            offer
+          }));
+        } catch (e) {
+          console.error(`[RTC] Renegotiation failed for ${peerId}:`, e);
+        }
       }
     );
 
@@ -422,6 +632,14 @@ import {
 
     if (localStream) {
       pc.addLocalStream(localStream);
+    }
+    
+    // Add camera track if camera is already enabled
+    if (cameraEnabled && cameraStream) {
+      const videoTrack = cameraStream.getVideoTracks()[0];
+      if (videoTrack) {
+        pc.addVideoTrack(videoTrack, cameraStream);
+      }
     }
 
     if (initiator) {
@@ -502,6 +720,242 @@ import {
       peerId: myId,
       muted
     }));
+  }
+
+  async function toggleCamera() {
+    if (!cameraSupported) return;
+
+    if (cameraEnabled) {
+      // Turn off camera
+      stopCameraStream(cameraStream);
+      cameraStream = null;
+      cameraEnabled = false;
+      
+      // Remove video track from all peer connections
+      for (const pc of connections.values()) {
+        pc.removeVideoTrack();
+      }
+      
+      // Broadcast camera off
+      socket?.send(JSON.stringify({
+        type: 'camera-status',
+        peerId: myId,
+        enabled: false
+      }));
+      
+      console.log('[Camera] Turned off');
+    } else {
+      // Turn on camera
+      try {
+        cameraStream = await getCameraStream();
+        cameraEnabled = true;
+        
+        // Update self video preview
+        if (selfVideoEl) {
+          selfVideoEl.srcObject = cameraStream;
+        }
+        
+        // Add video track to all existing peer connections
+        const videoTrack = cameraStream.getVideoTracks()[0];
+        if (videoTrack) {
+          for (const pc of connections.values()) {
+            pc.addVideoTrack(videoTrack, cameraStream);
+          }
+        }
+        
+        // Broadcast camera on
+        socket?.send(JSON.stringify({
+          type: 'camera-status',
+          peerId: myId,
+          enabled: true
+        }));
+        
+        console.log('[Camera] Turned on');
+      } catch (err) {
+        console.error('[Camera] Failed to start:', err);
+        cameraEnabled = false;
+      }
+    }
+  }
+
+  async function toggleScreenShare() {
+    if (!screenShareSupported) return;
+
+    if (screenSharing) {
+      // Stop sharing
+      screenShareManager?.stop();
+      screenShareManager = null;
+      screenSharing = false;
+      
+      // Broadcast stop
+      socket?.send(JSON.stringify({
+        type: 'screen-stop',
+        peerId: myId
+      }));
+      
+      console.log('[Screen] Stopped sharing');
+    } else {
+      // Start sharing
+      screenShareManager = new ScreenShareManager(
+        // onIceCandidate
+        (subscriberId, candidate) => {
+          socket?.send(JSON.stringify({
+            type: 'screen-ice',
+            to: subscriberId,
+            candidate
+          }));
+        },
+        // onEnded (user stopped via browser UI)
+        () => {
+          screenSharing = false;
+          socket?.send(JSON.stringify({
+            type: 'screen-stop',
+            peerId: myId
+          }));
+        }
+      );
+      
+      const stream = await screenShareManager.start();
+      if (stream) {
+        screenSharing = true;
+        
+        // Broadcast start
+        socket?.send(JSON.stringify({
+          type: 'screen-start',
+          peerId: myId
+        }));
+        
+        console.log('[Screen] Started sharing');
+      } else {
+        screenShareManager = null;
+      }
+    }
+  }
+
+  async function subscribeToScreen(peerId: string) {
+    const peer = peers.get(peerId);
+    if (!peer || !peer.screenSharing) return;
+    
+    // Already subscribed?
+    if (peer.screenSubscribed) {
+      // Unsubscribe
+      const viewerConn = screenViewerConnections.get(peerId);
+      if (viewerConn) {
+        viewerConn.close();
+        screenViewerConnections.delete(peerId);
+      }
+      peers.set(peerId, { ...peer, screenSubscribed: false, screenStream: undefined });
+      peers = new Map(peers);
+      
+      socket?.send(JSON.stringify({
+        type: 'screen-unsubscribe',
+        to: peerId
+      }));
+      
+      console.log(`[Screen] Unsubscribed from ${peer.name}`);
+      return;
+    }
+    
+    // Create viewer connection
+    const viewerConn = new ScreenViewerConnection(
+      peerId,
+      // onIceCandidate
+      (candidate) => {
+        socket?.send(JSON.stringify({
+          type: 'screen-ice',
+          to: peerId,
+          candidate
+        }));
+      },
+      // onTrack
+      (stream) => {
+        const p = peers.get(peerId);
+        if (p) {
+          peers.set(peerId, { ...p, screenStream: stream });
+          peers = new Map(peers);
+          console.log(`[Screen] Received stream from ${p.name}`);
+        }
+      }
+    );
+    
+    screenViewerConnections.set(peerId, viewerConn);
+    peers.set(peerId, { ...peer, screenSubscribed: true });
+    peers = new Map(peers);
+    
+    // Send subscribe request
+    socket?.send(JSON.stringify({
+      type: 'screen-subscribe',
+      to: peerId
+    }));
+    
+    console.log(`[Screen] Subscribing to ${peer.name}`);
+  }
+
+  function expandVideo(peerId: string, type: 'screen' | 'camera') {
+    expandedPeerId = peerId;
+    expandedType = type;
+  }
+
+  function closeExpandedView() {
+    expandedPeerId = null;
+  }
+
+  // Get expanded peer info
+  function getExpandedStream(): MediaStream | undefined {
+    if (!expandedPeerId) return undefined;
+    const peer = peers.get(expandedPeerId);
+    if (!peer) return undefined;
+    return expandedType === 'screen' ? peer.screenStream : peer.cameraStream;
+  }
+
+  function getExpandedName(): string {
+    if (!expandedPeerId) return '';
+    const peer = peers.get(expandedPeerId);
+    return peer?.name || '';
+  }
+
+  // Self PiP drag-to-hide
+  let pipStartX = 0;
+  let pipDragOffset = 0;
+  
+  function handlePipDragStart(e: MouseEvent | TouchEvent) {
+    if (!selfPipEl) return;
+    selfPipDragging = true;
+    pipStartX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+    pipDragOffset = 0;
+    e.preventDefault();
+    
+    document.addEventListener('mousemove', handlePipDrag);
+    document.addEventListener('mouseup', handlePipDragEnd);
+    document.addEventListener('touchmove', handlePipDrag);
+    document.addEventListener('touchend', handlePipDragEnd);
+  }
+  
+  function handlePipDrag(e: MouseEvent | TouchEvent) {
+    if (!selfPipDragging) return;
+    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+    pipDragOffset = clientX - pipStartX;
+  }
+  
+  function handlePipDragEnd() {
+    selfPipDragging = false;
+    // If dragged far enough left, hide it
+    if (pipDragOffset < -50) {
+      selfPipHidden = true;
+    } else if (selfPipHidden && pipDragOffset > 30) {
+      // If hidden and dragged right, show it
+      selfPipHidden = false;
+    }
+    pipDragOffset = 0;
+    
+    document.removeEventListener('mousemove', handlePipDrag);
+    document.removeEventListener('mouseup', handlePipDragEnd);
+    document.removeEventListener('touchmove', handlePipDrag);
+    document.removeEventListener('touchend', handlePipDragEnd);
+  }
+  
+  function togglePipVisibility() {
+    selfPipHidden = !selfPipHidden;
   }
 
   // Invite link helpers
@@ -604,6 +1058,11 @@ import {
     
     roomId = ($page.params.room as string) || 'main';
     roomParts = splitRoom(roomId);
+    
+    // Check camera and screen share support
+    cameraSupported = isCameraSupported();
+    screenShareSupported = isScreenShareSupported();
+    
     const hasAudio = await initAudio();
     if (hasAudio) {
       // Enable noise filter before connecting so initial sender is suppressed
@@ -622,6 +1081,14 @@ import {
     
     // Clean up noise suppression
     stopNoiseSuppression();
+    
+    // Clean up camera
+    stopCameraStream(cameraStream);
+    
+    // Clean up screen share
+    screenShareManager?.stop();
+    screenViewerConnections.forEach(conn => conn.close());
+    screenViewerConnections.clear();
     
     // Clean up mic audio context
     if (micAudioContext && micAudioContext.state !== 'closed') {
@@ -685,51 +1152,59 @@ import {
     </div>
   {/if}
 
-  <div class="peers-grid">
-    <!-- Self card -->
-    <div class="peer-card self-card glass" class:speaking={selfSpeaking && !muted} class:disconnected={!connected && !connecting} class:connecting>
-      <div class="avatar">
-        <div class="avatar-ring"></div>
-        {getInitials(myName || 'You')}
-      </div>
-      <div class="peer-name">
-        {#if editingName}
-          <input class="name-input" bind:this={nameInputEl} bind:value={nameDraft}
-                 onkeydown={(e) => (e.key === 'Enter' ? commitEditName() : e.key === 'Escape' ? cancelEditName() : null)}
-                 onblur={commitEditName}
-                 aria-label="Your display name" />
-          <span class="you-badge">You</span>
-        {:else}
-          <button type="button" class="self-name-button" title="Edit display name" onclick={startEditName} onkeydown={(e) => e.key === 'Enter' && startEditName()} aria-label="Edit display name">
-            <span class="self-name">{myName || '…'}</span>
-            <span class="you-badge">You</span>
-          </button>
-        {/if}
-      </div>
-      <span class="peer-status" class:muted={muted}>
-        {#if !connected}
-          {connecting ? 'Connecting...' : 'Disconnected'}
-        {:else if muted}
-          Muted
-        {:else}
-          &nbsp;
-        {/if}
-      </span>
-    </div>
-    <!-- Remote peers -->
-    {#each [...peers.values()] as peer (peer.id)}
-      <div class="peer-card glass" class:speaking={peer.speaking && !peer.muted}>
-        <div class="avatar">
-          <div class="avatar-ring"></div>
-          {getInitials(peer.name)}
+  {#if !theaterMode}
+    <!-- Normal grid view -->
+    <div class="peers-grid">
+      {#each sortedPeers as peer, index (peer.id)}
+        <div class="peer-card glass" class:speaking={peer.speaking && !peer.muted} class:has-video={(peer.cameraEnabled && peer.cameraStream) || (peer.screenSubscribed && peer.screenStream)} style="--index: {index}">
+          {#if peer.screenSubscribed && peer.screenStream}
+            <div 
+              class="video-preview screen-share-preview" 
+              onclick={() => expandVideo(peer.id, 'screen')}
+              role="button"
+              tabindex="0"
+              onkeydown={(e) => e.key === 'Enter' && expandVideo(peer.id, 'screen')}
+              title="Click to expand"
+            >
+              <video autoplay playsinline use:setVideoStream={peer.screenStream}></video>
+              <span class="expand-hint">Click to expand</span>
+            </div>
+          {:else if peer.cameraEnabled && peer.cameraStream}
+            <div 
+              class="video-preview"
+              onclick={() => expandVideo(peer.id, 'camera')}
+              role="button"
+              tabindex="0"
+              onkeydown={(e) => e.key === 'Enter' && expandVideo(peer.id, 'camera')}
+              title="Click to expand"
+            >
+              <video autoplay playsinline use:setVideoStream={peer.cameraStream}></video>
+            </div>
+          {:else}
+            <div class="avatar">
+              <div class="avatar-ring"></div>
+              {getInitials(peer.name)}
+            </div>
+          {/if}
+          <div class="peer-info">
+            <span class="peer-name">{peer.name}</span>
+            <span class="peer-status" class:muted={peer.muted}>{peer.muted ? 'Muted' : ''}</span>
+            <div class="media-indicators">
+              {#if peer.cameraEnabled}<span class="media-indicator"><i class="fa-solid fa-video"></i></span>{/if}
+              {#if peer.screenSharing}
+                <button 
+                  class="media-indicator screen-indicator" 
+                  class:subscribed={peer.screenSubscribed}
+                  onclick={() => subscribeToScreen(peer.id)}
+                  title={peer.screenSubscribed ? 'Stop watching' : 'Watch screen'}
+                ><i class="fa-solid fa-desktop"></i></button>
+              {/if}
+            </div>
+          </div>
         </div>
-        <span class="peer-name">{peer.name}</span>
-        <span class="peer-status" class:muted={peer.muted}>
-          {peer.muted ? 'Muted' : ''}
-        </span>
-      </div>
-    {/each}
-  </div>
+      {/each}
+    </div>
+  {/if}
 
   {#if connected && peers.size === 0}
     <div class="empty-state glass">
@@ -862,7 +1337,7 @@ import {
               </div>
             </div>
             <p class="filter-hint">
-              {vadScore >= vadThreshold ? '🎤 Voice passing' : '🔇 Silenced'}
+              {vadScore >= vadThreshold ? 'Voice passing' : 'Silenced'}
               <span class="threshold-hint">Drag marker to adjust</span>
             </p>
           </div>
@@ -891,6 +1366,40 @@ import {
           </svg>
         {/if}
       </button>
+      {#if cameraSupported}
+        <button 
+          class="camera-button" 
+          class:active={cameraEnabled}
+          onclick={toggleCamera}
+          aria-label={cameraEnabled ? 'Turn off camera' : 'Turn on camera'}
+        >
+          {#if cameraEnabled}
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+            </svg>
+          {:else}
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+              <path stroke-linecap="round" stroke-linejoin="round" d="M3 3l18 18" />
+            </svg>
+          {/if}
+        </button>
+      {/if}
+      {#if screenShareSupported}
+        <button 
+          class="screen-button" 
+          class:active={screenSharing}
+          onclick={toggleScreenShare}
+          aria-label={screenSharing ? 'Stop sharing screen' : 'Share screen'}
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+          </svg>
+          {#if screenSharing && screenShareManager}
+            <span class="subscriber-count">{screenShareManager.getSubscriberCount()}</span>
+          {/if}
+        </button>
+      {/if}
       <a 
         href="/" 
         class="hangup-button"
@@ -902,4 +1411,158 @@ import {
       </a>
     </div>
   {/if}
+
+  <!-- Self PiP (floating) -->
+  {#if connected}
+    <div 
+      bind:this={selfPipEl}
+      class="self-pip glass"
+      class:hidden={selfPipHidden}
+      class:speaking={selfSpeaking && !muted}
+      class:muted
+      onmousedown={handlePipDragStart}
+      ontouchstart={handlePipDragStart}
+      style={selfPipDragging ? `transform: translateX(${pipDragOffset}px)` : ''}
+      role="img"
+      aria-label="Your video"
+    >
+      <div class="pip-content">
+        {#if screenSharing && screenShareManager?.getStream()}
+          <!-- Screen share preview (priority when sharing) -->
+          {@const screenStream = screenShareManager.getStream()}
+          {#if screenStream}
+            <video autoplay playsinline muted use:setVideoStream={screenStream}></video>
+          {/if}
+        {:else if cameraEnabled && cameraStream}
+          <video bind:this={selfVideoEl} autoplay playsinline muted></video>
+        {:else}
+          <div class="pip-avatar">{getInitials(myName || 'You')}</div>
+        {/if}
+        <div class="pip-name">
+          {#if muted}<i class="fa-solid fa-microphone-slash"></i>{/if}
+          {#if screenSharing}<i class="fa-solid fa-desktop"></i>{/if}
+          {#if cameraEnabled}<i class="fa-solid fa-video"></i>{/if}
+          <span>{myName || 'You'}</span>
+          <span class="pip-badge">You</span>
+        </div>
+      </div>
+      <div class="pip-handle"></div>
+    </div>
+  {/if}
 </div>
+
+<!-- Theater Mode (outside main container) -->
+{#if theaterMode}
+  <div class="theater-mode">
+    <header class="theater-header">
+      <a href="/" class="brand-link">LoSpeak</a>
+      <button class="theater-close" onclick={closeExpandedView} aria-label="Close theater mode">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+        </svg>
+      </button>
+    </header>
+    
+    <div class="theater-stage">
+      {#if getExpandedStream()}
+        {@const expandedStream = getExpandedStream()}
+        <div class="theater-video-container" class:camera={expandedType === 'camera'}>
+          {#if expandedStream}
+            <video autoplay playsinline use:setVideoStream={expandedStream}></video>
+          {/if}
+        </div>
+      {:else}
+        <div class="theater-video-container">
+          <div class="no-stream">Stream ended</div>
+        </div>
+      {/if}
+      <div class="theater-sharer-name">
+        <i class="fa-solid {expandedType === 'screen' ? 'fa-desktop' : 'fa-video'}"></i>
+        <span>{getExpandedName()}</span>
+        <span class="type-badge">{expandedType === 'screen' ? 'Screen' : 'Camera'}</span>
+      </div>
+    </div>
+    
+    <!-- Peer strip -->
+    <div class="theater-peer-strip">
+      <div class="peer-strip-scroll">
+        {#each sortedPeers as peer, index (peer.id)}
+          <div 
+            class="peer-strip-card" 
+            class:speaking={peer.speaking && !peer.muted}
+            class:has-video={(peer.cameraEnabled && peer.cameraStream) || (peer.screenSubscribed && peer.screenStream)}
+            style="--index: {index}"
+            onclick={() => {
+              if (peer.screenSubscribed && peer.screenStream) {
+                expandVideo(peer.id, 'screen');
+              } else if (peer.cameraEnabled && peer.cameraStream) {
+                expandVideo(peer.id, 'camera');
+              }
+            }}
+            role="button"
+            tabindex="0"
+            onkeydown={(e) => e.key === 'Enter' && (peer.screenSubscribed && peer.screenStream ? expandVideo(peer.id, 'screen') : peer.cameraEnabled && peer.cameraStream && expandVideo(peer.id, 'camera'))}
+          >
+            {#if peer.screenSubscribed && peer.screenStream}
+              <div class="strip-video">
+                <video autoplay playsinline muted use:setVideoStream={peer.screenStream}></video>
+              </div>
+            {:else if peer.cameraEnabled && peer.cameraStream}
+              <div class="strip-video">
+                <video autoplay playsinline muted use:setVideoStream={peer.cameraStream}></video>
+              </div>
+            {:else}
+              <div class="strip-avatar">{getInitials(peer.name)}</div>
+            {/if}
+            <span class="strip-name">{peer.name}</span>
+            <div class="strip-indicators">
+              {#if peer.cameraEnabled}<i class="fa-solid fa-video"></i>{/if}
+              {#if peer.screenSharing}<i class="fa-solid fa-desktop"></i>{/if}
+              {#if peer.muted}<i class="fa-solid fa-microphone-slash"></i>{/if}
+            </div>
+          </div>
+        {/each}
+      </div>
+    </div>
+    
+    <!-- Call controls in theater -->
+    <div class="call-controls">
+      <button 
+        class="mute-button" 
+        class:muted 
+        onclick={toggleMute}
+        aria-label={muted ? 'Unmute' : 'Mute'}
+      >
+        {#if muted}
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+            <path stroke-linecap="round" stroke-linejoin="round" d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" />
+          </svg>
+        {:else}
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+          </svg>
+        {/if}
+      </button>
+      {#if cameraSupported}
+        <button class="camera-button" class:active={cameraEnabled} onclick={toggleCamera}>
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+          </svg>
+        </button>
+      {/if}
+      {#if screenShareSupported}
+        <button class="screen-button" class:active={screenSharing} onclick={toggleScreenShare}>
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+          </svg>
+        </button>
+      {/if}
+      <a href="/" class="hangup-button" aria-label="Leave room">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M16 8l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2M5 3a2 2 0 00-2 2v1c0 8.284 6.716 15 15 15h1a2 2 0 002-2v-3.28a1 1 0 00-.684-.948l-4.493-1.498a1 1 0 00-1.21.502l-1.13 2.257a11.042 11.042 0 01-5.516-5.517l2.257-1.128a1 1 0 00.502-1.21L9.228 3.683A1 1 0 008.279 3H5z" />
+        </svg>
+      </a>
+    </div>
+  </div>
+{/if}
