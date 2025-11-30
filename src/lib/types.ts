@@ -41,9 +41,11 @@ export interface PeerState extends PeerInfo {
   // Camera (presence layer - received automatically)
   cameraEnabled: boolean;
   cameraStream?: MediaStream;
+  cameraAspectRatio?: number;  // e.g., 1.78 for 16:9, 1.33 for 4:3
   
   // Screen share (content layer - subscription required)
   screenSharing: boolean;
   screenStream?: MediaStream;
   screenSubscribed: boolean;
+  screenAspectRatio?: number;  // e.g., 3.56 for 32:9, 1.78 for 16:9
 }

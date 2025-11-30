@@ -130,11 +130,30 @@ html, body {
 
 /* Peers grid */
 .peers-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: flex-start;
   gap: 1.5rem;
   width: 100%;
-  max-width: 800px;
+  max-width: 95%;
+}
+
+/* Cards without video use fixed width */
+.peers-grid .peer-card:not(.has-video) {
+  width: 220px;
+  flex: 0 0 auto;
+}
+
+/* Cards with video grow based on aspect ratio */
+.peers-grid .peer-card.has-video {
+  --aspect: var(--video-aspect, 1.33);
+  /* Width = height × aspect ratio, with min/max bounds */
+  min-width: 200px;
+  max-width: min(90vw, 500px);
+  /* Wider cards for wider content */
+  width: clamp(200px, calc(var(--aspect) * 160px), 500px);
+  flex: 0 1 auto;
 }
 
 /* Theater mode: peers become horizontal strip */
@@ -1014,7 +1033,10 @@ html, body {
 /* Video preview in peer cards */
 .video-preview {
   width: 100%;
-  aspect-ratio: 4 / 3;
+  /* Dynamic aspect ratio from video stream */
+  aspect-ratio: var(--video-aspect, 4/3);
+  min-height: 120px;
+  max-height: 280px;
   border-radius: var(--radius-md);
   overflow: hidden;
   background: var(--bg-secondary);
@@ -1023,10 +1045,15 @@ html, body {
   justify-content: center;
 }
 
+/* Ultra-wide previews get shorter max height */
+.video-preview.ultrawide {
+  max-height: 180px;
+}
+
 .video-preview video {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain; /* Show full content, not cropped */
   border-radius: var(--radius-md);
 }
 
@@ -1263,10 +1290,22 @@ button.screen-indicator.subscribed {
 
 .self-pip .pip-content {
   position: relative;
-  aspect-ratio: 4 / 3;
+  /* Dynamic aspect ratio from stream */
+  aspect-ratio: var(--video-aspect, 4/3);
+  min-width: 80px;
+  max-width: 180px;
   background: var(--bg-secondary);
   border-radius: var(--radius-md);
   overflow: hidden;
+}
+
+/* Ultra-wide self-pip gets wider */
+.self-pip.ultrawide {
+  width: auto;
+}
+
+.self-pip.ultrawide .pip-content {
+  width: clamp(120px, calc(var(--video-aspect, 1.78) * 60px), 200px);
 }
 
 .self-pip video {
@@ -1409,8 +1448,10 @@ button.screen-indicator.subscribed {
 }
 
 .theater-video-container {
-  width: 100%;
-  max-width: 1200px;
+  /* Dynamic sizing based on video aspect ratio */
+  --aspect: var(--video-aspect, 1.78); /* Default 16:9 */
+  width: auto;
+  max-width: min(95vw, calc(var(--aspect) * 65vh));
   max-height: 65vh;
   border-radius: var(--radius-lg);
   overflow: auto; /* Allow pinch-zoom scroll */
@@ -1418,10 +1459,21 @@ button.screen-indicator.subscribed {
   touch-action: manipulation; /* Enable pinch-zoom */
 }
 
+/* Ultra-wide content (aspect > 2.5) gets more vertical space */
+.theater-video-container.ultrawide {
+  max-height: 45vh;
+  max-width: min(98vw, calc(var(--aspect) * 45vh));
+}
+
 .theater-video-container video {
   width: 100%;
-  height: 100%;
+  height: auto;
+  max-height: 65vh;
   object-fit: contain;
+}
+
+.theater-video-container.ultrawide video {
+  max-height: 45vh;
 }
 
 .theater-video-container.camera video {
@@ -1585,19 +1637,28 @@ button.screen-indicator.subscribed {
     height: 20px;
   }
   
+  /* Video preview respects aspect ratio on mobile too */
   .video-preview {
-    aspect-ratio: 16 / 9;
+    min-height: 100px;
+    max-height: 200px;
   }
   
   /* Self PiP mobile */
   .self-pip {
-    width: 80px;
+    width: auto;
+    min-width: 70px;
+    max-width: 120px;
     bottom: 6rem;
   }
   
-  /* Theater mode mobile */
+  /* Theater mode mobile - allow full width for ultra-wide */
   .theater-video-container {
-    max-height: 50vh;
+    max-height: 40vh;
+    max-width: 98vw;
+  }
+  
+  .theater-video-container.ultrawide {
+    max-height: 30vh;
   }
   
   .peer-strip-card {
@@ -1614,7 +1675,13 @@ button.screen-indicator.subscribed {
     font-size: 0.75rem;
   }
   
-  .peers-grid {
-    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  /* Peer cards on mobile - full width with aspect ratio */
+  .peers-grid .peer-card {
+    width: 100%;
+    max-width: 400px;
+  }
+  
+  .peers-grid .peer-card.has-video {
+    max-width: 95vw;
   }
 }

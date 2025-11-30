@@ -133,6 +133,10 @@ import { ScreenShareManager, ScreenViewerConnection, isScreenShareSupported } fr
     return name.split(' ').map(w => w[0]).join('').slice(0, 2);
   }
 
+  // Self aspect ratios (for self-pip)
+  let selfCameraAspectRatio = $state(1.33);  // Default 4:3
+  let selfScreenAspectRatio = $state(1.78);  // Default 16:9
+
   // Svelte action to set video srcObject
   function setVideoStream(node: HTMLVideoElement, stream: MediaStream) {
     node.srcObject = stream;
@@ -146,6 +150,78 @@ import { ScreenShareManager, ScreenViewerConnection, isScreenShareSupported } fr
         node.srcObject = null;
       }
     };
+  }
+
+  /**
+   * Enhanced action that sets video stream AND detects aspect ratio.
+   * Updates peer state or self state with the detected ratio.
+   */
+  function setVideoStreamWithAspect(
+    node: HTMLVideoElement, 
+    params: { stream: MediaStream; peerId?: string; type: 'camera' | 'screen'; isSelf?: boolean }
+  ) {
+    const { stream, peerId, type, isSelf } = params;
+    node.srcObject = stream;
+    
+    function detectAspect() {
+      if (node.videoWidth && node.videoHeight) {
+        const ratio = node.videoWidth / node.videoHeight;
+        console.log(`[Video] Detected aspect ratio: ${ratio.toFixed(2)} (${node.videoWidth}x${node.videoHeight})`);
+        
+        if (isSelf) {
+          // Update self aspect ratio
+          if (type === 'camera') selfCameraAspectRatio = ratio;
+          else selfScreenAspectRatio = ratio;
+        } else if (peerId) {
+          // Update peer aspect ratio
+          const peer = peers.get(peerId);
+          if (peer) {
+            if (type === 'camera') {
+              peers.set(peerId, { ...peer, cameraAspectRatio: ratio });
+            } else {
+              peers.set(peerId, { ...peer, screenAspectRatio: ratio });
+            }
+            peers = new Map(peers);  // Trigger reactivity
+          }
+        }
+      }
+    }
+    
+    node.addEventListener('loadedmetadata', detectAspect);
+    // Also try on canplay as backup
+    node.addEventListener('canplay', detectAspect);
+    
+    return {
+      update(newParams: { stream: MediaStream; peerId?: string; type: 'camera' | 'screen'; isSelf?: boolean }) {
+        if (node.srcObject !== newParams.stream) {
+          node.srcObject = newParams.stream;
+        }
+      },
+      destroy() {
+        node.removeEventListener('loadedmetadata', detectAspect);
+        node.removeEventListener('canplay', detectAspect);
+        node.srcObject = null;
+      }
+    };
+  }
+  
+  // Helper to determine if aspect ratio is ultra-wide (> 2.5:1)
+  function isUltrawide(ratio: number | undefined): boolean {
+    return (ratio ?? 1.78) > 2.5;
+  }
+  
+  // Get effective aspect ratio for a peer's visible video
+  function getPeerVideoAspect(peer: { screenSubscribed?: boolean; screenAspectRatio?: number; cameraAspectRatio?: number }): number {
+    if (peer.screenSubscribed && peer.screenAspectRatio) return peer.screenAspectRatio;
+    if (peer.cameraAspectRatio) return peer.cameraAspectRatio;
+    return 1.33;  // Default 4:3
+  }
+  
+  // Get effective self aspect ratio
+  function getSelfVideoAspect(): number {
+    if (screenSharing) return selfScreenAspectRatio;
+    if (cameraEnabled) return selfCameraAspectRatio;
+    return 1.33;
   }
 
   async function loadAudioDevices() {
@@ -914,6 +990,15 @@ import { ScreenShareManager, ScreenViewerConnection, isScreenShareSupported } fr
     const peer = peers.get(expandedPeerId);
     return peer?.name || '';
   }
+  
+  function getExpandedAspectRatio(): number {
+    if (!expandedPeerId) return 1.78;
+    const peer = peers.get(expandedPeerId);
+    if (!peer) return 1.78;
+    return expandedType === 'screen' 
+      ? (peer.screenAspectRatio ?? 1.78) 
+      : (peer.cameraAspectRatio ?? 1.33);
+  }
 
   // Self PiP drag-to-hide
   let pipStartX = 0;
@@ -1157,29 +1242,39 @@ import { ScreenShareManager, ScreenViewerConnection, isScreenShareSupported } fr
     <!-- Normal grid view -->
     <div class="peers-grid">
       {#each sortedPeers as peer, index (peer.id)}
-        <div class="peer-card glass" class:speaking={peer.speaking && !peer.muted} class:has-video={(peer.cameraEnabled && peer.cameraStream) || (peer.screenSubscribed && peer.screenStream)} style="--index: {index}">
+        {@const peerAspect = getPeerVideoAspect(peer)}
+        <div 
+          class="peer-card glass" 
+          class:speaking={peer.speaking && !peer.muted} 
+          class:has-video={(peer.cameraEnabled && peer.cameraStream) || (peer.screenSubscribed && peer.screenStream)} 
+          style="--index: {index}; --video-aspect: {peerAspect}"
+        >
           {#if peer.screenSubscribed && peer.screenStream}
             <div 
               class="video-preview screen-share-preview" 
+              class:ultrawide={isUltrawide(peer.screenAspectRatio)}
+              style="--video-aspect: {peer.screenAspectRatio ?? 1.78}"
               onclick={() => expandVideo(peer.id, 'screen')}
               role="button"
               tabindex="0"
               onkeydown={(e) => e.key === 'Enter' && expandVideo(peer.id, 'screen')}
               title="Click to expand"
             >
-              <video autoplay playsinline use:setVideoStream={peer.screenStream}></video>
+              <video autoplay playsinline use:setVideoStreamWithAspect={{ stream: peer.screenStream, peerId: peer.id, type: 'screen' }}></video>
               <span class="expand-hint">Click to expand</span>
             </div>
           {:else if peer.cameraEnabled && peer.cameraStream}
             <div 
               class="video-preview"
+              class:ultrawide={isUltrawide(peer.cameraAspectRatio)}
+              style="--video-aspect: {peer.cameraAspectRatio ?? 1.33}"
               onclick={() => expandVideo(peer.id, 'camera')}
               role="button"
               tabindex="0"
               onkeydown={(e) => e.key === 'Enter' && expandVideo(peer.id, 'camera')}
               title="Click to expand"
             >
-              <video autoplay playsinline use:setVideoStream={peer.cameraStream}></video>
+              <video autoplay playsinline use:setVideoStreamWithAspect={{ stream: peer.cameraStream, peerId: peer.id, type: 'camera' }}></video>
             </div>
           {:else}
             <div class="avatar">
@@ -1415,27 +1510,29 @@ import { ScreenShareManager, ScreenViewerConnection, isScreenShareSupported } fr
 
   <!-- Self PiP (floating) -->
   {#if connected}
+    {@const selfAspect = getSelfVideoAspect()}
     <div 
       bind:this={selfPipEl}
       class="self-pip glass"
       class:hidden={selfPipHidden}
       class:speaking={selfSpeaking && !muted}
       class:muted
+      class:ultrawide={isUltrawide(selfAspect)}
       onmousedown={handlePipDragStart}
       ontouchstart={handlePipDragStart}
-      style={selfPipDragging ? `transform: translateX(${pipDragOffset}px)` : ''}
+      style="--video-aspect: {selfAspect}; {selfPipDragging ? `transform: translateX(${pipDragOffset}px)` : ''}"
       role="img"
       aria-label="Your video"
     >
-      <div class="pip-content">
+      <div class="pip-content" style="--video-aspect: {selfAspect}">
         {#if screenSharing && screenShareManager?.getStream()}
           <!-- Screen share preview (priority when sharing) -->
           {@const screenStream = screenShareManager.getStream()}
           {#if screenStream}
-            <video autoplay playsinline muted use:setVideoStream={screenStream}></video>
+            <video autoplay playsinline muted use:setVideoStreamWithAspect={{ stream: screenStream, type: 'screen', isSelf: true }}></video>
           {/if}
         {:else if cameraEnabled && cameraStream}
-          <video bind:this={selfVideoEl} autoplay playsinline muted></video>
+          <video bind:this={selfVideoEl} autoplay playsinline muted use:setVideoStreamWithAspect={{ stream: cameraStream, type: 'camera', isSelf: true }}></video>
         {:else}
           <div class="pip-avatar">{getInitials(myName || 'You')}</div>
         {/if}
@@ -1454,6 +1551,7 @@ import { ScreenShareManager, ScreenViewerConnection, isScreenShareSupported } fr
 
 <!-- Theater Mode (outside main container) -->
 {#if theaterMode}
+  {@const theaterAspect = getExpandedAspectRatio()}
   <div class="theater-mode">
     <header class="theater-header">
       <a href="/" class="brand-link">LoSpeak</a>
@@ -1467,9 +1565,14 @@ import { ScreenShareManager, ScreenViewerConnection, isScreenShareSupported } fr
     <div class="theater-stage">
       {#if getExpandedStream()}
         {@const expandedStream = getExpandedStream()}
-        <div class="theater-video-container" class:camera={expandedType === 'camera'}>
+        <div 
+          class="theater-video-container" 
+          class:camera={expandedType === 'camera'}
+          class:ultrawide={isUltrawide(theaterAspect)}
+          style="--video-aspect: {theaterAspect}"
+        >
           {#if expandedStream}
-            <video autoplay playsinline use:setVideoStream={expandedStream}></video>
+            <video autoplay playsinline use:setVideoStreamWithAspect={{ stream: expandedStream, peerId: expandedPeerId ?? undefined, type: expandedType }}></video>
           {/if}
         </div>
       {:else}
