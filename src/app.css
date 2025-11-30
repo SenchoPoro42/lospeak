@@ -75,9 +75,15 @@ html, body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  padding: 2rem;
-  gap: 2rem;
+  justify-content: flex-start;
+  padding: 1.5rem 2rem 8rem; /* Extra bottom for controls */
+  gap: 1.5rem;
+}
+
+/* When room has video content, let it breathe */
+.container:has(.peers-grid .has-video) {
+  justify-content: flex-start;
+  padding-top: 1rem;
 }
 
 /* Header */
@@ -133,10 +139,13 @@ html, body {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
-  align-items: flex-start;
+  align-items: center;
   gap: 1.5rem;
   width: 100%;
-  max-width: 95%;
+  max-width: 100%;
+  padding: 0 2rem;
+  /* Fill vertical space too */
+  flex: 1;
 }
 
 /* Cards without video use fixed width */
@@ -145,15 +154,23 @@ html, body {
   flex: 0 0 auto;
 }
 
-/* Cards with video grow based on aspect ratio */
+/* Cards with video - fill available space aggressively */
 .peers-grid .peer-card.has-video {
   --aspect: var(--video-aspect, 1.33);
-  /* Width = height × aspect ratio, with min/max bounds */
-  min-width: 200px;
-  max-width: min(90vw, 500px);
-  /* Wider cards for wider content */
-  width: clamp(200px, calc(var(--aspect) * 160px), 500px);
-  flex: 0 1 auto;
+  /* Much larger bounds - use the space! */
+  min-width: 400px;
+  max-width: min(90vw, 1400px);
+  /* Scale with viewport and aspect ratio */
+  width: clamp(400px, calc(var(--aspect) * 50vh), 1400px);
+  flex: 1 1 auto;
+}
+
+/* When only 1-2 video cards, let them get huge */
+.peers-grid .peer-card.has-video:only-child,
+.peers-grid .peer-card.has-video:first-child:nth-last-child(2),
+.peers-grid .peer-card.has-video:last-child:nth-child(2) {
+  max-width: min(95vw, 1600px);
+  width: clamp(500px, 70vw, 1600px);
 }
 
 /* Theater mode: peers become horizontal strip */
@@ -1035,8 +1052,8 @@ html, body {
   width: 100%;
   /* Dynamic aspect ratio from video stream */
   aspect-ratio: var(--video-aspect, 4/3);
-  min-height: 120px;
-  max-height: 280px;
+  min-height: 200px;
+  /* No max-height - let it grow with the card */
   border-radius: var(--radius-md);
   overflow: hidden;
   background: var(--bg-secondary);
@@ -1045,9 +1062,9 @@ html, body {
   justify-content: center;
 }
 
-/* Ultra-wide previews get shorter max height */
+/* Ultra-wide previews */
 .video-preview.ultrawide {
-  max-height: 180px;
+  /* Still no height limit - aspect ratio controls it */
 }
 
 .video-preview video {
@@ -1448,32 +1465,33 @@ button.screen-indicator.subscribed {
 }
 
 .theater-video-container {
-  /* Dynamic sizing based on video aspect ratio */
+  /* Dynamic sizing - fill available space */
   --aspect: var(--video-aspect, 1.78); /* Default 16:9 */
   width: auto;
-  max-width: min(95vw, calc(var(--aspect) * 65vh));
-  max-height: 65vh;
+  /* Use most of the viewport */
+  max-width: min(98vw, calc(var(--aspect) * 80vh));
+  max-height: 80vh;
   border-radius: var(--radius-lg);
   overflow: auto; /* Allow pinch-zoom scroll */
   background: #000;
   touch-action: manipulation; /* Enable pinch-zoom */
 }
 
-/* Ultra-wide content (aspect > 2.5) gets more vertical space */
+/* Ultra-wide content - prioritize width, reduce height */
 .theater-video-container.ultrawide {
-  max-height: 45vh;
-  max-width: min(98vw, calc(var(--aspect) * 45vh));
+  max-height: 55vh;
+  max-width: min(98vw, calc(var(--aspect) * 55vh));
 }
 
 .theater-video-container video {
   width: 100%;
   height: auto;
-  max-height: 65vh;
+  max-height: 80vh;
   object-fit: contain;
 }
 
 .theater-video-container.ultrawide video {
-  max-height: 45vh;
+  max-height: 55vh;
 }
 
 .theater-video-container.camera video {
