@@ -38,6 +38,10 @@ export interface PeerState extends PeerInfo {
   audioLevel: number;
   connection?: RTCPeerConnection;
   
+  // Local volume control (user's personal preference for this peer)
+  localVolume: number;  // 0-1, multiplied with global outputVolume
+  localMuted: boolean;  // Muted locally by user
+  
   // Camera (presence layer - received automatically)
   cameraEnabled: boolean;
   cameraStream?: MediaStream;

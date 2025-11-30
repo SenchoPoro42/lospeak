@@ -93,6 +93,9 @@ import { ScreenShareManager, ScreenViewerConnection, isScreenShareSupported } fr
   let micGain = $state(1.0);       // 0-2 range (0% to 200%)
   let outputVolume = $state(1.0); // 0-1 range (0% to 100%)
   let micGainNode: GainNode | null = null;
+  
+  // Per-peer volume popover
+  let volumePopoverPeerId = $state<string | null>(null);
   let micAudioContext: AudioContext | null = null;
   let localStream: MediaStream | null = null;
   let socket: PartySocket | null = null;
@@ -349,9 +352,98 @@ import { ScreenShareManager, ScreenViewerConnection, isScreenShareSupported } fr
    */
   function updateOutputVolume(value: number) {
     outputVolume = value;
-    for (const audio of audioElements.values()) {
-      audio.volume = value;
+    // Apply to all peers, respecting their individual volume
+    for (const [peerId, audio] of audioElements.entries()) {
+      const peer = peers.get(peerId);
+      if (peer) {
+        audio.volume = peer.localMuted ? 0 : value * peer.localVolume;
+      } else {
+        audio.volume = value;
+      }
     }
+  }
+  
+  /**
+   * Update a specific peer's local volume
+   */
+  function updatePeerVolume(peerId: string, volume: number) {
+    const peer = peers.get(peerId);
+    if (peer) {
+      peers.set(peerId, { ...peer, localVolume: volume });
+      peers = new Map(peers);
+      
+      // Apply to audio element
+      const audio = audioElements.get(peerId);
+      if (audio) {
+        audio.volume = peer.localMuted ? 0 : outputVolume * volume;
+      }
+      
+      // Save to localStorage
+      savePeerVolumePref(peerId, volume, peer.localMuted);
+    }
+  }
+  
+  /**
+   * Toggle a specific peer's local mute
+   */
+  function togglePeerMute(peerId: string) {
+    const peer = peers.get(peerId);
+    if (peer) {
+      const newMuted = !peer.localMuted;
+      peers.set(peerId, { ...peer, localMuted: newMuted });
+      peers = new Map(peers);
+      
+      // Apply to audio element
+      const audio = audioElements.get(peerId);
+      if (audio) {
+        audio.volume = newMuted ? 0 : outputVolume * peer.localVolume;
+      }
+      
+      // Save to localStorage
+      savePeerVolumePref(peerId, peer.localVolume, newMuted);
+    }
+  }
+  
+  /**
+   * Save peer volume preference to localStorage
+   */
+  function savePeerVolumePref(peerId: string, volume: number, muted: boolean) {
+    try {
+      const prefs = JSON.parse(localStorage.getItem('peerVolumePrefs') || '{}');
+      prefs[peerId] = { volume, muted };
+      localStorage.setItem('peerVolumePrefs', JSON.stringify(prefs));
+    } catch {}
+  }
+  
+  /**
+   * Load peer volume preference from localStorage
+   */
+  function loadPeerVolumePref(peerId: string): { volume: number; muted: boolean } {
+    try {
+      const prefs = JSON.parse(localStorage.getItem('peerVolumePrefs') || '{}');
+      if (prefs[peerId]) {
+        return {
+          volume: prefs[peerId].volume ?? 1.0,
+          muted: prefs[peerId].muted ?? false
+        };
+      }
+    } catch {}
+    return { volume: 1.0, muted: false };
+  }
+  
+  /**
+   * Open volume popover for a peer
+   */
+  function openVolumePopover(e: MouseEvent, peerId: string) {
+    e.stopPropagation();
+    volumePopoverPeerId = volumePopoverPeerId === peerId ? null : peerId;
+  }
+  
+  /**
+   * Close volume popover
+   */
+  function closeVolumePopover() {
+    volumePopoverPeerId = null;
   }
 
   /**
@@ -609,12 +701,18 @@ import { ScreenShareManager, ScreenViewerConnection, isScreenShareSupported } fr
   async function connectToPeer(peerId: string, name: string, initiator: boolean, isScreenSharing: boolean = false) {
     if (connections.has(peerId)) return;
 
+    // Load saved volume preferences for this peer
+    const volumePref = loadPeerVolumePref(peerId);
+    
     const peerState: PeerState = {
       id: peerId,
       name,
       muted: false,
       speaking: false,
       audioLevel: 0,
+      // Local volume control
+      localVolume: volumePref.volume,
+      localMuted: volumePref.muted,
       // Camera (presence layer)
       cameraEnabled: false,
       cameraStream: undefined,
@@ -642,7 +740,9 @@ import { ScreenShareManager, ScreenViewerConnection, isScreenShareSupported } fr
         const audio = new Audio();
         audio.srcObject = stream;
         audio.autoplay = true;
-        audio.volume = outputVolume;
+        // Apply both global and per-peer volume
+        const peer = peers.get(peerId);
+        audio.volume = peer?.localMuted ? 0 : outputVolume * (peer?.localVolume ?? 1.0);
         audioElements.set(peerId, audio);
         
         // Explicit play() with error handling for autoplay policy
@@ -1199,6 +1299,9 @@ import { ScreenShareManager, ScreenViewerConnection, isScreenShareSupported } fr
   });
 </script>
 
+<!-- Close volume popover when clicking outside -->
+<svelte:window onclick={() => volumePopoverPeerId && closeVolumePopover()} />
+
 <svelte:head>
   <title>LoSpeak</title>
   <meta name="description" content="Local network voice chat" />
@@ -1284,7 +1387,10 @@ import { ScreenShareManager, ScreenViewerConnection, isScreenShareSupported } fr
           {/if}
           <div class="peer-info">
             <span class="peer-name">{peer.name}</span>
-            <span class="peer-status" class:muted={peer.muted}>{peer.muted ? 'Muted' : ''}</span>
+            <span class="peer-status" class:muted={peer.muted}>
+              {peer.muted ? 'Muted' : ''}
+              {#if peer.localMuted}<span class="local-muted-badge">Silenced</span>{/if}
+            </span>
             <div class="media-indicators">
               {#if peer.cameraEnabled}<span class="media-indicator"><i class="fa-solid fa-video"></i></span>{/if}
               {#if peer.screenSharing}
@@ -1295,8 +1401,70 @@ import { ScreenShareManager, ScreenViewerConnection, isScreenShareSupported } fr
                   title={peer.screenSubscribed ? 'Stop watching' : 'Watch screen'}
                 ><i class="fa-solid fa-desktop"></i></button>
               {/if}
+              <button 
+                class="media-indicator volume-indicator" 
+                class:muted={peer.localMuted}
+                class:reduced={peer.localVolume < 0.9 && !peer.localMuted}
+                onclick={(e) => openVolumePopover(e, peer.id)}
+                title="Adjust volume"
+              >
+                {#if peer.localMuted}
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" width="14" height="14">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" />
+                  </svg>
+                {:else}
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" width="14" height="14">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                  </svg>
+                {/if}
+              </button>
             </div>
           </div>
+          
+          <!-- Volume popover -->
+          {#if volumePopoverPeerId === peer.id}
+            <div class="volume-popover glass" onclick={(e) => e.stopPropagation()}>
+              <div class="volume-popover-header">
+                <span>Volume: {peer.name}</span>
+                <button class="popover-close" onclick={closeVolumePopover} aria-label="Close">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" width="14" height="14">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+              <label class="volume-popover-label">
+                <button 
+                  class="mute-toggle" 
+                  class:muted={peer.localMuted}
+                  onclick={() => togglePeerMute(peer.id)}
+                  aria-label={peer.localMuted ? 'Unmute' : 'Mute'}
+                >
+                  {#if peer.localMuted}
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" width="18" height="18">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" />
+                    </svg>
+                  {:else}
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" width="18" height="18">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                    </svg>
+                  {/if}
+                </button>
+                <input 
+                  type="range" 
+                  min="0" 
+                  max="1" 
+                  step="0.05" 
+                  value={peer.localVolume}
+                  disabled={peer.localMuted}
+                  oninput={(e) => updatePeerVolume(peer.id, parseFloat(e.currentTarget.value))}
+                  class="peer-volume-slider"
+                />
+                <span class="volume-value">{Math.round(peer.localVolume * 100)}%</span>
+              </label>
+            </div>
+          {/if}
         </div>
       {/each}
     </div>
