@@ -47,6 +47,9 @@ import { ScreenShareManager, ScreenViewerConnection, isScreenShareSupported } fr
   let screenShareManager: ScreenShareManager | null = null;
   let screenViewerConnections = new Map<string, ScreenViewerConnection>();
   
+  // Peers map - must be declared before $effect/$derived that reference it
+  let peers = $state<Map<string, PeerState>>(new Map());
+  
   // Expanded view / Theater mode state
   let expandedPeerId = $state<string | null>(null);
   let expandedType = $state<'screen' | 'camera'>('screen');
@@ -91,8 +94,6 @@ import { ScreenShareManager, ScreenViewerConnection, isScreenShareSupported } fr
   let outputVolume = $state(1.0); // 0-1 range (0% to 100%)
   let micGainNode: GainNode | null = null;
   let micAudioContext: AudioContext | null = null;
-  
-  let peers = $state<Map<string, PeerState>>(new Map());
   let localStream: MediaStream | null = null;
   let socket: PartySocket | null = null;
   let connections = new Map<string, PeerConnection>();
