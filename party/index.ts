@@ -57,7 +57,17 @@ type SignalMessage =
   | { type: "mute-status"; peerId: string; muted: boolean }
   | { type: "rename-request"; name: string }
   | { type: "rename"; peerId: string; name: string }
-  | { type: "error"; reason: string };
+  | { type: "error"; reason: string }
+  // Camera (presence layer)
+  | { type: "camera-status"; peerId: string; enabled: boolean }
+  // Screen share
+  | { type: "screen-start"; peerId: string }
+  | { type: "screen-stop"; peerId: string }
+  | { type: "screen-subscribe"; from: string; to: string }
+  | { type: "screen-unsubscribe"; from: string; to: string }
+  | { type: "screen-offer"; from: string; to: string; offer: RTCSessionDescriptionInit }
+  | { type: "screen-answer"; from: string; to: string; answer: RTCSessionDescriptionInit }
+  | { type: "screen-ice"; from: string; to: string; candidate: RTCIceCandidateInit };
 
 interface PeerInfo {
   id: string;
@@ -65,8 +75,12 @@ interface PeerInfo {
   connection: Party.Connection;
 }
 
+// Maximum concurrent screen sharers (soft limit)
+const MAX_SCREEN_SHARERS = 4;
+
 export default class LoSpeakServer implements Party.Server {
   peers: Map<string, PeerInfo> = new Map();
+  screenSharers: Set<string> = new Set(); // Track who's sharing screen
 
   constructor(public room: Party.Room) {}
 
@@ -77,10 +91,14 @@ export default class LoSpeakServer implements Party.Server {
     // Store peer info
     this.peers.set(peerId, { id: peerId, name, connection: conn });
 
-    // Send the new peer their assigned name and existing peers
+    // Send the new peer their assigned name and existing peers (including screen share status)
     const existingPeers = Array.from(this.peers.values())
       .filter(p => p.id !== peerId)
-      .map(p => ({ id: p.id, name: p.name }));
+      .map(p => ({ 
+        id: p.id, 
+        name: p.name,
+        screenSharing: this.screenSharers.has(p.id)
+      }));
     
     conn.send(JSON.stringify({
       type: "welcome",
@@ -123,6 +141,54 @@ export default class LoSpeakServer implements Party.Server {
             muted: data.muted
           }), [sender.id]);
           break;
+
+        case "camera-status":
+          // Broadcast camera status to all peers (presence layer)
+          this.broadcast(JSON.stringify({
+            type: "camera-status",
+            peerId: sender.id,
+            enabled: (data as any).enabled
+          }), [sender.id]);
+          break;
+
+        case "screen-start": {
+          // Track screen sharer and broadcast
+          if (this.screenSharers.size >= MAX_SCREEN_SHARERS && !this.screenSharers.has(sender.id)) {
+            // Soft limit reached - still allow but could warn
+            console.log(`[Room ${this.room.id}] Screen share slots full (${this.screenSharers.size}/${MAX_SCREEN_SHARERS})`);
+          }
+          this.screenSharers.add(sender.id);
+          this.broadcast(JSON.stringify({
+            type: "screen-start",
+            peerId: sender.id
+          }), [sender.id]);
+          break;
+        }
+
+        case "screen-stop":
+          // Remove from sharers and broadcast
+          this.screenSharers.delete(sender.id);
+          this.broadcast(JSON.stringify({
+            type: "screen-stop",
+            peerId: sender.id
+          }), [sender.id]);
+          break;
+
+        case "screen-subscribe":
+        case "screen-unsubscribe":
+        case "screen-offer":
+        case "screen-answer":
+        case "screen-ice": {
+          // Relay screen share signaling to specific peer
+          const target = this.peers.get((data as any).to);
+          if (target) {
+            target.connection.send(JSON.stringify({
+              ...data,
+              from: sender.id
+            }));
+          }
+          break;
+        }
         case "rename-request": {
           const current = this.peers.get(sender.id);
           if (!current) break;
@@ -150,6 +216,16 @@ export default class LoSpeakServer implements Party.Server {
   onClose(conn: Party.Connection) {
     const peerId = conn.id;
     this.peers.delete(peerId);
+    
+    // Clean up screen share if they were sharing
+    if (this.screenSharers.has(peerId)) {
+      this.screenSharers.delete(peerId);
+      // Broadcast screen-stop so others can clean up
+      this.broadcast(JSON.stringify({
+        type: "screen-stop",
+        peerId
+      }));
+    }
     
     // Notify all peers about the departure
     this.broadcast(JSON.stringify({
