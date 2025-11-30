@@ -1,0 +1,59 @@
+<svg width="1200" height="630" viewBox="0 0 1200 630" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0a0a0f"/>
+      <stop offset="50%" style="stop-color:#1a1a2e"/>
+      <stop offset="100%" style="stop-color:#16213e"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1"/>
+      <stop offset="100%" style="stop-color:#8b5cf6"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="4" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  
+  <!-- Background -->
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  
+  <!-- Decorative circles -->
+  <circle cx="150" cy="500" r="200" fill="rgba(99, 102, 241, 0.08)"/>
+  <circle cx="1050" cy="130" r="150" fill="rgba(139, 92, 246, 0.06)"/>
+  
+  <!-- Glass card effect -->
+  <rect x="300" y="180" width="600" height="270" rx="24" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)" stroke-width="1"/>
+  
+  <!-- Logo text -->
+  <text x="600" y="290" font-family="Inter, -apple-system, sans-serif" font-size="72" font-weight="600" fill="#fff" text-anchor="middle" filter="url(#glow)">LoSpeak</text>
+  
+  <!-- Tagline -->
+  <text x="600" y="360" font-family="Inter, -apple-system, sans-serif" font-size="28" fill="rgba(255,255,255,0.7)" text-anchor="middle">Simple, shareable peer-to-peer voice chat</text>
+  
+  <!-- Feature pills -->
+  <g font-family="Inter, -apple-system, sans-serif" font-size="16" fill="rgba(255,255,255,0.5)">
+    <rect x="350" y="400" width="100" height="32" rx="16" fill="rgba(99, 102, 241, 0.2)"/>
+    <text x="400" y="421" text-anchor="middle" fill="rgba(255,255,255,0.8)">Voice</text>
+    
+    <rect x="470" y="400" width="100" height="32" rx="16" fill="rgba(139, 92, 246, 0.2)"/>
+    <text x="520" y="421" text-anchor="middle" fill="rgba(255,255,255,0.8)">Camera</text>
+    
+    <rect x="590" y="400" width="130" height="32" rx="16" fill="rgba(34, 197, 94, 0.2)"/>
+    <text x="655" y="421" text-anchor="middle" fill="rgba(255,255,255,0.8)">Screen Share</text>
+    
+    <rect x="740" y="400" width="110" height="32" rx="16" fill="rgba(99, 102, 241, 0.2)"/>
+    <text x="795" y="421" text-anchor="middle" fill="rgba(255,255,255,0.8)">No Signup</text>
+  </g>
+  
+  <!-- Mic icon with speaking ring -->
+  <circle cx="600" cy="540" r="40" fill="url(#accent)" filter="url(#glow)"/>
+  <circle cx="600" cy="540" r="48" fill="none" stroke="rgba(34, 197, 94, 0.5)" stroke-width="3">
+    <animate attributeName="r" values="48;56;48" dur="1.5s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0.5;0.2;0.5" dur="1.5s" repeatCount="indefinite"/>
+  </circle>
+  <path d="M600 520 v20 M592 532 h16 M588 540 v8 a12 12 0 0 0 24 0 v-8" fill="none" stroke="white" stroke-width="3" stroke-linecap="round"/>
+</svg>
