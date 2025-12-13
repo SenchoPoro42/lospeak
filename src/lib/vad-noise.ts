@@ -245,8 +245,8 @@ export async function startVadNoiseSuppression(
     sourceNode = audioContext.createMediaStreamSource(stream);
     
     // Use ScriptProcessorNode (deprecated but works everywhere)
-    // Buffer size 4096 gives good balance of latency vs efficiency
-    scriptNode = audioContext.createScriptProcessor(4096, 1, 1);
+    // Buffer size 1024 (~21ms at 48kHz) for low latency voice chat
+    scriptNode = audioContext.createScriptProcessor(1024, 1, 1);
     scriptNode.onaudioprocess = processAudio;
     
     destinationNode = audioContext.createMediaStreamDestination();
