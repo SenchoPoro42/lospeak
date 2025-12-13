@@ -107,6 +107,65 @@ export class PeerConnection {
     this.pc.close();
   }
 
+  /**
+   * Get connection diagnostics for debugging latency issues.
+   * Returns ICE candidate type, RTT, jitter buffer delay, etc.
+   */
+  async getStats(): Promise<{
+    candidateType: string;
+    remoteCandidateType: string;
+    roundTripTime: number | null;
+    jitterBufferDelay: number | null;
+    packetsReceived: number;
+    packetsLost: number;
+  } | null> {
+    try {
+      const stats = await this.pc.getStats();
+      let result = {
+        candidateType: 'unknown',
+        remoteCandidateType: 'unknown',
+        roundTripTime: null as number | null,
+        jitterBufferDelay: null as number | null,
+        packetsReceived: 0,
+        packetsLost: 0
+      };
+
+      stats.forEach((report) => {
+        // Get active ICE candidate pair
+        if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+          result.roundTripTime = report.currentRoundTripTime ?? null;
+          
+          // Get local candidate type
+          const localCandidate = stats.get(report.localCandidateId);
+          if (localCandidate) {
+            result.candidateType = localCandidate.candidateType || 'unknown';
+          }
+          
+          // Get remote candidate type
+          const remoteCandidate = stats.get(report.remoteCandidateId);
+          if (remoteCandidate) {
+            result.remoteCandidateType = remoteCandidate.candidateType || 'unknown';
+          }
+        }
+        
+        // Get inbound audio stats
+        if (report.type === 'inbound-rtp' && report.kind === 'audio') {
+          result.packetsReceived = report.packetsReceived || 0;
+          result.packetsLost = report.packetsLost || 0;
+          // Jitter buffer delay in seconds
+          if (report.jitterBufferDelay && report.jitterBufferEmittedCount) {
+            result.jitterBufferDelay = report.jitterBufferDelay / report.jitterBufferEmittedCount;
+          }
+        }
+      });
+
+      return result;
+    } catch (e) {
+      console.error('[RTC] Error getting stats:', e);
+      return null;
+    }
+  }
+
   async replaceAudioTrack(newTrack: MediaStreamTrack) {
     const senders = this.pc.getSenders();
     const audioSender = senders.find(s => s.track?.kind === 'audio');
