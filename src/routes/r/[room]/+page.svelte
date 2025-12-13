@@ -1239,27 +1239,6 @@ import { ScreenShareManager, ScreenViewerConnection, isScreenShareSupported } fr
     document.removeEventListener('touchend', handleThresholdDragEnd);
   }
 
-  // Periodic stats logging for debugging latency
-  let statsInterval: ReturnType<typeof setInterval> | null = null;
-  
-  async function logConnectionStats() {
-    for (const [peerId, pc] of connections) {
-      const stats = await pc.getStats();
-      if (stats) {
-        const peer = peers.get(peerId);
-        const rtt = stats.roundTripTime !== null ? (stats.roundTripTime * 1000).toFixed(1) : '?';
-        const jitter = stats.jitterBufferDelay !== null ? (stats.jitterBufferDelay * 1000).toFixed(1) : '?';
-        console.log(
-          `[Stats] ${peer?.name || peerId}: ` +
-          `ICE=${stats.candidateType}↔${stats.remoteCandidateType} ` +
-          `RTT=${rtt}ms ` +
-          `JitterBuf=${jitter}ms ` +
-          `Lost=${stats.packetsLost}/${stats.packetsReceived}`
-        );
-      }
-    }
-  }
-
   onMount(async () => {
     if (!browser) return;
     
@@ -1278,9 +1257,6 @@ import { ScreenShareManager, ScreenViewerConnection, isScreenShareSupported } fr
       }
       connectToRoom(roomId);
       updateLocalLevel();
-      
-      // Log connection stats every 5 seconds for debugging
-      statsInterval = setInterval(logConnectionStats, 5000);
     }
   });
 
@@ -1288,7 +1264,6 @@ import { ScreenShareManager, ScreenViewerConnection, isScreenShareSupported } fr
     if (!browser) return;
     
     cancelAnimationFrame(animationFrame);
-    if (statsInterval) clearInterval(statsInterval);
     
     // Clean up noise suppression
     stopNoiseSuppression();

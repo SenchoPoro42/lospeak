@@ -60,13 +60,6 @@ let outputReadIdx = 0;
 let voiceHoldCounter = 0;
 let isVoiceActive = false;
 
-// Debug
-let lastLogTime = 0;
-let vadScoreSum = 0;
-let vadScoreCount = 0;
-let silencedFrames = 0;
-let passedFrames = 0;
-
 /**
  * Load the RNNoise WASM module using Jitsi's loader.
  */
@@ -170,18 +163,11 @@ function processAudio(event: AudioProcessingEvent): void {
     if (vadScore >= vadThreshold) {
       isVoiceActive = true;
       voiceHoldCounter = HOLD_FRAMES;
-      passedFrames++;
     } else if (voiceHoldCounter > 0) {
       voiceHoldCounter--;
-      passedFrames++;
     } else {
       isVoiceActive = false;
-      silencedFrames++;
     }
-    
-    // Track VAD scores for debug
-    vadScoreSum += vadScore;
-    vadScoreCount++;
     
     // Write to output buffer (denoised audio if voice, silence otherwise)
     for (let i = 0; i < RNNOISE_SAMPLE_LENGTH; i++) {
@@ -201,22 +187,6 @@ function processAudio(event: AudioProcessingEvent): void {
   } else {
     // Not enough data - output silence (shouldn't happen in steady state)
     output.fill(0);
-  }
-  
-  // Debug log every second
-  const now = performance.now() / 1000;
-  if (now - lastLogTime >= 1.0) {
-    const avgVad = vadScoreCount > 0 ? (vadScoreSum / vadScoreCount).toFixed(3) : 'N/A';
-    console.log('[VAD Debug] avgVAD:', avgVad, 
-      '| silenced:', silencedFrames, 
-      '| passed:', passedFrames,
-      '| threshold:', vadThreshold,
-      '| outBuffer:', outAvailable);
-    vadScoreSum = 0;
-    vadScoreCount = 0;
-    silencedFrames = 0;
-    passedFrames = 0;
-    lastLogTime = now;
   }
 }
 
@@ -264,7 +234,6 @@ export async function startVadNoiseSuppression(
     outputReadIdx = 0;
     voiceHoldCounter = 0;
     isVoiceActive = false;
-    lastLogTime = performance.now() / 1000;
     
     processedTrack = destinationNode.stream.getAudioTracks()[0];
     isActive = true;
